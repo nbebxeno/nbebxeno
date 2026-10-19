@@ -12,6 +12,7 @@ const qrImagePath = `${authDirectory}/whatsapp-qr.png`;
 const sessions = new GameSessions({ tieRule: "no-elimination", revealRoleOnDeath: false }, "./.data/lordxeno-games.json");
 const phaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const phaseDeadlines = new Map<string, number>();
+const duplicateJoinWarnings = new Set<string>();
 const commandCooldowns = new Map<string, number>();
 const stats = new StatsStore();
 let activeSocket: ReturnType<typeof makeWASocket> | null = null;
@@ -87,7 +88,7 @@ function remainingSeconds(groupId: string): number | null {
 function recordCompletedGame(groupId: string): void {
   const result = sessions.completedRecord(groupId);
   if (!result) return;
-  for (const player of result.players) stats.record(player.id, player.role, player.faction === result.winner, player.lynched, player.alive);
+  for (const player of result.players) stats.record(player.id, player.role, player.faction === result.winner || result.individualWinners.includes(player.id), player.lynched, player.alive);
   stats.addChronicle(`${new Date().toISOString().slice(0, 10)}: ${result.winner} victory in ${groupId}; ${result.players.length} players summoned.`);
 }
 
@@ -176,7 +177,8 @@ async function startWhatsApp(): Promise<void> {
         await safeSend(socket, message.key.remoteJid, helpText());
         continue;
       }
-      const senderId = message.key.participant ?? message.key.remoteJid;
+      const participantAlias = message.key.participant;
+      const joinWarningKey = `${remoteJid}:${participantIdentity(message)}`;
       const groupIdentity = participantIdentity(message);
       const sender = { id: groupIdentity, displayName: message.pushName ?? groupIdentity };
       try {
@@ -208,7 +210,7 @@ async function startWhatsApp(): Promise<void> {
         if (commandName === "lobby") {
           clearPhaseTimer(remoteJid);
           await safeSend(socket, message.key.remoteJid, `${lobbyMessage(sessions.createLobby(message.key.remoteJid, sender))}\n\nThe lobby is waiting for the host's mode selection.`);
-          sessions.registerAlias(message.key.remoteJid, groupIdentity, message.key.remoteJid);
+          if (participantAlias && participantAlias !== groupIdentity) sessions.registerAlias(remoteJid, groupIdentity, participantAlias);
         } else if (commandName === "mode") {
           const mode = command.slice("!xeno mode ".length).trim();
           if (mode !== "classic" && mode !== "beginner" && mode !== "chaos") throw new GameError("Choose classic, beginner, or chaos.");
@@ -216,10 +218,13 @@ async function startWhatsApp(): Promise<void> {
           await safeSend(socket, remoteJid, `🎭 Game mode set to ${mode}. Players may now join the lobby.`);
         } else if (commandName === "join") {
           if (!sessions.mode(remoteJid)) throw new GameError("The host must choose a game mode before players join.");
-          await safeSend(socket, message.key.remoteJid, lobbyMessage(sessions.joinLobby(message.key.remoteJid, sender)));
-          sessions.registerAlias(message.key.remoteJid, groupIdentity, message.key.remoteJid);
+          const lobby = sessions.joinLobby(remoteJid, sender);
+          duplicateJoinWarnings.delete(joinWarningKey);
+          await safeSend(socket, remoteJid, lobbyMessage(lobby));
+          if (participantAlias && participantAlias !== groupIdentity) sessions.registerAlias(remoteJid, groupIdentity, participantAlias);
         } else if (commandName === "leave") {
           sessions.leaveLobby(message.key.remoteJid, groupIdentity);
+          duplicateJoinWarnings.delete(joinWarningKey);
           await safeSend(socket, message.key.remoteJid, `${sender.displayName} left the lobby.`);
         } else if (commandName === "players") {
           const lobby = sessions.snapshot(message.key.remoteJid);
@@ -251,15 +256,13 @@ async function startWhatsApp(): Promise<void> {
         } else if (commandName === "vote") {
           throw new GameError("Voting happens privately. Check your DM from lordxeno.");
         } else if (commandName === "unvote") {
-          sessions.unvote(remoteJid, groupIdentity);
-          await safeSend(socket, remoteJid, `${sender.displayName}'s vote was retracted.`);
+          throw new GameError("Retract your vote privately with !xeno unvote in DM.");
         } else if (commandName === "votes") {
           const tally = sessions.voteSnapshot(remoteJid);
           const view = sessions.gameSnapshot(remoteJid);
           const lines = Object.entries(tally.counts).map(([targetId, count]) => `${view.players.find((player) => player.id === targetId)?.displayName ?? targetId}: ${count}`);
           await safeSend(socket, remoteJid, `🗳️ VOTES\n\n${lines.length ? lines.join("\n") : "No votes yet."}`);
         } else if (commandName === "resolve") {
-          clearPhaseTimer(remoteJid);
           await resolveVotePhase(socket, remoteJid, "manual");
         } else if (commandName === "night-resolve") {
           await resolveNightPhase(socket, remoteJid, false);
@@ -290,6 +293,10 @@ async function startWhatsApp(): Promise<void> {
           await safeSend(socket, remoteJid, `⚙️ SETTINGS\n\nEnabled roles: ${sessions.settings(remoteJid).join(", ")}\n\nRole toggles are reserved for the role-composition pass.`);
         }
       } catch (error) {
+        if (commandName === "join" && error instanceof GameError && error.message === "You're already in the lobby.") {
+          if (duplicateJoinWarnings.has(joinWarningKey)) continue;
+          duplicateJoinWarnings.add(joinWarningKey);
+        }
         const response = error instanceof GameError ? error.message : "The command could not be completed.";
         await safeSend(socket, message.key.remoteJid, response);
       }
@@ -369,7 +376,10 @@ async function resolveNightPhase(socket: ReturnType<typeof makeWASocket>, groupI
     }
     const deaths = result.deaths.map((id) => publicView.players.find((player) => player.id === id)?.displayName ?? id);
     const dawn = deaths.length ? `🌅 DAWN\n\n${deaths.join(" and ")} did not survive the night.` : "🌅 DAWN\n\nThe darkness recedes. No one was lost this night.";
-    if (result.winner) recordCompletedGame(groupId);
+    if (result.winner) {
+      await safeSend(socket, groupId, `${dawn}\n\n${result.winner.toUpperCase()} WINS.`);
+      recordCompletedGame(groupId);
+    }
     if (!result.winner) void enterPhase(socket, groupId, "discussion", `${dawn}\n\nDay ${publicView.dayNumber} discussion begins. You have 60 seconds.`, "voting");
   } catch (error) {
     await safeSend(socket, groupId, error instanceof GameError ? error.message : "Night could not be resolved.");
@@ -377,12 +387,15 @@ async function resolveNightPhase(socket: ReturnType<typeof makeWASocket>, groupI
 }
 
 async function resolveVotePhase(socket: ReturnType<typeof makeWASocket>, groupId: string, trigger: "timer" | "all-votes-submitted" | "manual" = "timer"): Promise<void> {
-  clearPhaseTimer(groupId);
   logPhaseTransition(groupId, "vote-resolution", trigger);
   try {
-    const result = sessions.resolveVote(groupId, true);
+    const result = sessions.resolveVote(groupId, trigger === "timer");
+    clearPhaseTimer(groupId);
     const view = sessions.gameSnapshot(groupId);
     const death = result.eliminatedPlayerId ? view.players.find((player) => player.id === result.eliminatedPlayerId) : null;
+    if (death && sessions.gameSnapshot(groupId).individualWinners.includes(death.id)) {
+      await safeSend(socket, groupId, `${death.displayName} achieved their individual lynching win. Other factions can still win.`);
+    }
     await safeSend(socket, groupId, death ? `⚖️ VOTE RESOLVED\n\n${death.displayName} has been eliminated.` : "⚖️ VOTE RESOLVED\n\nNo eligible vote was received or the vote tied.");
     if (result.winner) {
       await safeSend(socket, groupId, `${result.winner.toUpperCase()} WINS.`);

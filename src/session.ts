@@ -58,7 +58,7 @@ export class GameSessions {
   joinLobby(groupId: string, player: Player): LobbySnapshot {
     const session = this.requireLobby(groupId);
     if (session.engine) throw new GameError("The current game has already started.");
-    if (session.players.has(player.id) || session.aliases.has(player.id)) throw new GameError("You're already in the lobby.");
+    if (this.lobbyPlayerId(session, player.id)) throw new GameError("You're already in the lobby.");
     session.players.set(player.id, player);
     this.persist();
     return this.snapshot(groupId);
@@ -69,6 +69,7 @@ export class GameSessions {
     if (session.engine) throw new GameError("Players cannot leave after the game starts.");
     const playerId = this.resolvePlayerId(groupId, playerIdentity);
     session.players.delete(playerId);
+    this.removeAliases(session, playerId);
     this.persist();
   }
 
@@ -78,6 +79,7 @@ export class GameSessions {
     const targetId = this.resolvePlayerId(groupId, targetIdentity);
     if (session.engine) throw new GameError("Kicking players during an active game is not yet defined.");
     session.players.delete(targetId);
+    this.removeAliases(session, targetId);
     this.persist();
   }
 
@@ -101,6 +103,7 @@ export class GameSessions {
 
   groupForIdentity(identity: string): string {
     for (const [groupId, session] of this.sessions) {
+      if (session.engine?.publicView().status !== "active") continue;
       if (session.players.has(identity) || session.aliases.has(identity)) return groupId;
       const normalized = identity.split("@")[0].replace(/\D/g, "");
       if ([...session.players.keys()].some((id) => id.split("@")[0].replace(/\D/g, "") === normalized)) return groupId;
@@ -191,7 +194,7 @@ export class GameSessions {
   graveyard(groupId: string) { return this.requireStartedGame(groupId).publicView().deaths; }
   settings(groupId: string): string[] { return this.requireLobby(groupId).enabledRoles ?? ["werewolf", "villager", "seer", "doctor", "hunter"]; }
   setSettings(groupId: string, roles: string[]): void { this.requireLobby(groupId).enabledRoles = roles; }
-  completedRecord(groupId: string): { winner: string; players: CompletedPlayer[] } | null {
+  completedRecord(groupId: string): { winner: string; individualWinners: string[]; players: CompletedPlayer[] } | null {
     const session = this.requireLobby(groupId);
     const view = session.engine?.publicView();
     if (!session.engine || !view?.winner || session.recorded) return null;
@@ -199,6 +202,7 @@ export class GameSessions {
     this.persist();
     return {
       winner: view.winner,
+      individualWinners: view.individualWinners,
       players: view.players.map((player) => {
         const privateView = session.engine!.privateView(player.id);
         return { id: player.id, role: privateView.role, faction: privateView.faction, alive: player.alive, lynched: view.deaths.some((death) => death.playerId === player.id && death.cause === "vote") };
@@ -224,6 +228,22 @@ export class GameSessions {
     const result = this.requireStartedGame(groupId).resolveNight(force);
     this.persist();
     return result;
+  }
+
+  private lobbyPlayerId(session: GroupSession, identity: string): string | undefined {
+    if (session.players.has(identity)) return identity;
+    const aliased = session.aliases.get(identity);
+    if (aliased && session.players.has(aliased)) return aliased;
+    // Device suffixes belong to the same account; PN and LID are separate
+    // namespaces and must be linked by explicit WhatsApp identity metadata.
+    const canonical = (id: string) => id.replace(/:\d+(?=@)/, "");
+    return [...session.players.keys()].find((id) => canonical(id) === canonical(identity));
+  }
+
+  private removeAliases(session: GroupSession, playerId: string): void {
+    for (const [alias, owner] of session.aliases) {
+      if (owner === playerId) session.aliases.delete(alias);
+    }
   }
 
   private requireLobby(groupId: string): GroupSession {
@@ -282,3 +302,4 @@ export class GameSessions {
     writeFileSync(this.filePath, JSON.stringify(stored, null, 2));
   }
 }
+

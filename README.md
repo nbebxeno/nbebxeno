@@ -45,7 +45,7 @@ After the discussion timer ends, voting opens automatically. The group remains l
 !xeno vote 2
 ```
 
-Send that command to lordxeno by DM, not in the group. Use `!xeno unvote` by DM to retract a vote.
+Send that command to lordxeno by DM, not in the group. Use `!xeno unvote` by DM to retract a vote. Group-chat votes and retractions are rejected; the bot never promotes or demotes players to enable voting.
 
 When every living player has voted, any player may send:
 
@@ -53,7 +53,7 @@ When every living player has voted, any player may send:
 !xeno resolve
 ```
 
-The first discussion, later discussions, voting, and night phases each last 60 seconds. Voting closes immediately when all eligible players vote; night closes immediately when all required actions arrive. Missing votes and night actions are autoskipped at timeout. Voting is not available during the first discussion. The current configured tie policy is no elimination.
+The first discussion, later discussions, voting, and night phases each last 60 seconds. Voting closes immediately when all eligible players vote; night closes immediately when all required actions arrive. Missing votes and night actions are autoskipped at timeout. Voting is not available during the first discussion. The current configured tie policy is no elimination. Manual `!xeno resolve` requires every living vote; only the phase timeout skips missing votes, so an early manual request cannot cancel the voting timer.
 
 ## Night action test
 
@@ -75,7 +75,7 @@ The Seer receives their result privately. Dawn, deaths, protection outcomes, and
 
 Command definitions live in [src/commands.ts](src/commands.ts). The WhatsApp transport resolves incoming messages through that registry, and `!xeno help` is generated from the same entries, grouped by setup, game, voting, meta, and admin. Duplicate command names fail during module initialization.
 
-The role database in [src/engine.ts](src/engine.ts) includes the full requested catalogue, with separate IDs for `poisoner-werewolf`, `poisoner-neutral`, `priest-village`, and `priest-neutral`. Fool is explicitly Neutral. Classic and Beginner use their controlled core pools; Chaos randomly draws from its eligible catalogue pool while preserving the single Werewolf baseline. Catalogue entries whose mechanics are not yet specified remain marked `UNDEFINED - REQUIRES DESIGN`.
+The role database in [src/engine.ts](src/engine.ts) includes the full requested catalogue, with separate IDs for `poisoner-werewolf`, `poisoner-neutral`, `priest-village`, and `priest-neutral`. Fool is explicitly Neutral. Classic and Beginner use their controlled core pools; Chaos randomly draws from its eligible catalogue pool without replacement from all 43 non-Werewolf catalogue roles, while preserving the existing single attacking Werewolf baseline. Classic and Beginner retain their existing compositions pending Part 2’s eligibility and balance rules. Chaos can assign unfinished catalogue roles; their missing abilities are not implemented by this selection change. Catalogue entries whose mechanics are not yet specified remain marked `UNDEFINED - REQUIRES DESIGN`.
 
 ## Reliability and recovery
 
@@ -140,3 +140,12 @@ Phase transitions log the group, timestamp, phase, and trigger (`timer`, `all-vo
 - AFK/disconnect handling, admin controls, narration generation, and recovery
 
 The engine currently accepts the configured tie rule `no-elimination` and a death-reveal flag as integration-facing policy, but does not yet publish role or faction reveals. These policies should be finalized before the first production game.
+
+
+## Part 6 implementation notes
+
+- Repeated joins never add another roster entry. The bot sends one “already in the lobby” warning per player/group until that player successfully rejoins or the process restarts. Leaving and kicking clear identity aliases so returning players can join again.
+- All 58 catalogue roles have explicit faction mappings, including separate Poisoner and Priest IDs. Fool and Tanner record individual lynching wins independently of the eventual faction result. These outcomes survive game saves and count toward personal wins when the faction game completes; other Neutral objectives remain unspecified.
+- Chaos samples the entire non-Werewolf catalogue uniformly without replacement, refilling only after exhaustion. This spreads selections beyond the previous eight-role subset and varies even four-player games. Werewolf variants remain outside the selection pool because their abilities and attack coordination are unfinished.
+- Part 2 is still needed to finalize each mode’s eligible pool, rare-role weights, and player-count balance. The existing one-Werewolf composition is provisional, especially for larger groups. Classic and Beginner composition changes and undefined individual objectives require those missing rules.
+- The simulated WhatsApp test checks group locking, private voting prompts, DM votes/retractions, duplicate join replies, and early resolution. It does not establish live WhatsApp connectivity.

@@ -36,6 +36,7 @@ export interface GameState {
   nightActions: Record<PlayerId, NightAction>;
   deaths: DeathRecord[];
   winner: Faction | null;
+  individualWinners: PlayerId[];
 }
 
 export interface DeathRecord {
@@ -55,6 +56,7 @@ export interface NightResolution {
   protectedTargetId: PlayerId | null;
   phase: Phase;
   winner: Faction | null;
+  individualWinners: PlayerId[];
 }
 
 export interface PrivatePlayerView {
@@ -73,6 +75,7 @@ export interface PublicGameView {
   players: Array<Player & { alive: boolean }>;
   deaths: DeathRecord[];
   winner: Faction | null;
+  individualWinners: PlayerId[];
 }
 
 export interface NumberedAlivePlayer {
@@ -227,7 +230,8 @@ export class GameEngine {
       votes: {},
       nightActions: {},
       deaths: [],
-      winner: null
+      winner: null,
+      individualWinners: []
     };
     this.assignRoles(roles);
   }
@@ -246,6 +250,7 @@ export class GameEngine {
     const engine = Object.create(GameEngine.prototype) as GameEngine;
     engine.rules = rules;
     engine.state = JSON.parse(JSON.stringify(state)) as GameState;
+    engine.state.individualWinners ??= [];
     return engine;
   }
 
@@ -255,17 +260,26 @@ export class GameEngine {
 
   static roleComposition(playerCount: number, mode: GameMode = "classic", random = Math.random): RoleName[] {
     if (playerCount < 4) throw new GameError("A game requires at least 4 players.");
-    const roles: RoleName[] = mode === "beginner"
+    const roles: RoleName[] = mode === "chaos" ? ["werewolf"] : mode === "beginner"
       ? ["werewolf", "seer", "villager", "villager"]
       : ["werewolf", "seer", "doctor", "villager"];
-    if (mode !== "beginner" && playerCount >= 5) roles.push(mode === "chaos" ? GameEngine.randomChaosRole(random) : "hunter");
-    while (roles.length < playerCount) roles.push(mode === "chaos" ? GameEngine.randomChaosRole(random) : "villager");
+    if (mode === "chaos") {
+      // Preserve the existing single-Werewolf balance until Part 2 is supplied.
+      // Sampling without replacement gives every other catalogue role a turn
+      // before repeats, including roles with mechanics still awaiting design.
+      const pool = Object.keys(ROLE_DATABASE).filter((role) =>
+        ROLE_DATABASE[role].faction !== "werewolves" && !roles.includes(role));
+      const eligible = [...pool];
+      while (roles.length < playerCount) {
+        if (!pool.length) pool.push(...eligible);
+        const index = Math.floor(random() * pool.length);
+        roles.push(pool.splice(index, 1)[0]);
+      }
+    } else {
+      if (mode === "classic" && playerCount >= 5) roles.push("hunter");
+      while (roles.length < playerCount) roles.push("villager");
+    }
     return roles;
-  }
-
-  private static randomChaosRole(random: () => number): RoleName {
-    const pool: RoleName[] = ["villager", "seer", "doctor", "hunter", "fool", "mason", "witch", "apprentice-seer"];
-    return pool[Math.floor(random() * pool.length)];
   }
 
   publicView(): PublicGameView {
@@ -276,6 +290,7 @@ export class GameEngine {
       phase: this.state.phase,
       players: Object.values(this.state.players).map((player) => ({ ...player, alive: this.state.alive.includes(player.id) })),
       deaths: this.state.deaths.map((death) => ({ ...death })),
+      individualWinners: [...this.state.individualWinners],
       winner: this.state.winner
     };
   }
@@ -355,6 +370,9 @@ export class GameEngine {
       return null;
     }
     this.kill(leaders[0], "vote");
+    if (["fool", "tanner"].includes(this.state.roles[leaders[0]]!)) {
+      this.state.individualWinners.push(leaders[0]);
+    }
     this.checkWinner();
     if (!this.state.winner) {
       this.state.phase = "night";
@@ -389,7 +407,7 @@ export class GameEngine {
   resolveNight(force = false): NightResolution {
     this.requirePhase("night");
     this.checkWinner();
-    if (this.state.status === "ended") return { deaths: [], investigations: [], protectedTargetId: null, phase: "ended", winner: this.state.winner };
+    if (this.state.status === "ended") return { deaths: [], investigations: [], protectedTargetId: null, phase: "ended", winner: this.state.winner, individualWinners: [...this.state.individualWinners] };
     const requiredActors = this.requiredNightActors();
     if (!force && requiredActors.some((actorId) => !this.state.nightActions[actorId])) {
       throw new GameError("All available night actions must be submitted before resolution.");
@@ -411,7 +429,7 @@ export class GameEngine {
       this.state.dayNumber += 1;
       this.state.phase = "discussion";
     }
-    return { deaths, investigations, protectedTargetId: protection?.targetId ?? null, phase: this.state.phase, winner: this.state.winner };
+    return { deaths, investigations, protectedTargetId: protection?.targetId ?? null, phase: this.state.phase, winner: this.state.winner, individualWinners: [...this.state.individualWinners] };
   }
 
   forceEnd(): void {
