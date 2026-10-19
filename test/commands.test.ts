@@ -23,3 +23,14 @@ test("registered command names are unique", () => {
   const names = COMMAND_REGISTRY.map((command) => command.name);
   assert.equal(new Set(names).size, names.length);
 });
+
+test("short commands accept case and whitespace while legacy commands still resolve", () => {
+  for (const [short, name] of [["!join", "join"], ["!status", "status"], ["!vote 2", "vote"], ["!night 3", "night"], ["!start", "start"], ["!unvote", "unvote"], ["!mode chaos", "mode"]]) {
+    assert.equal(resolveCommand(short)?.name, name);
+    assert.equal(resolveCommand(short.replace("!", "!xeno "))?.name, name);
+  }
+  assert.equal(resolveCommand("  !XENO   VOTE   2 ")?.name, "vote");
+  assert.equal(resolveCommand("!STATUS")?.name, "status");
+  assert.equal(resolveCommand("!xeno")?.name, "help");
+  for (const text of ["join", "status", "let's !vote 2", "!unknown", "!xenojoin"]) assert.equal(resolveCommand(text), undefined);
+});

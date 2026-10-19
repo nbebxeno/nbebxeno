@@ -42,6 +42,7 @@ export interface GameState {
 }
 
 export interface DeathRecord {
+  role?: RoleName;
   playerId: PlayerId;
   dayNumber: number;
   cause: "vote" | "night-attack" | "undefined";
@@ -296,7 +297,9 @@ export class GameEngine {
       nightNumber: this.state.nightNumber,
       phase: this.state.phase,
       players: Object.values(this.state.players).map((player) => ({ ...player, alive: this.state.alive.includes(player.id) })),
-      deaths: this.state.deaths.map((death) => ({ ...death })),
+      deaths: this.state.deaths.map(({ role, ...death }) => this.rules.revealRoleOnDeath
+        ? { ...death, role: role ?? this.state.roles[death.playerId] }
+        : death),
       individualWinners: [...this.state.individualWinners],
       winner: this.state.winner
     };
@@ -454,7 +457,7 @@ export class GameEngine {
 
   private kill(playerId: PlayerId, cause: DeathRecord["cause"]): void {
     this.state.alive = this.state.alive.filter((id) => id !== playerId);
-    this.state.deaths.push({ playerId, dayNumber: this.state.dayNumber, cause });
+    this.state.deaths.push({ playerId, role: this.state.roles[playerId], dayNumber: this.state.dayNumber, cause });
   }
 
   private checkWinner(): void {

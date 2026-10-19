@@ -5,12 +5,13 @@ import * as qrcodeImage from "qrcode";
 import { GameError } from "./engine.ts";
 import { GameSessions } from "./session.ts";
 import { StatsStore } from "./stats.ts";
-import { helpText, resolveCommand } from "./commands.ts";
-import { roleCard, lobbyCard, rosterCard, statusCard, rolesCard, roleLabel, factionLabel } from "./presentation.ts";
+import { helpText, resolveCommand, normalizeCommand } from "./commands.ts";
+import { roleCard, lobbyCard, rosterCard, statusCard, rolesCard, roleLabel, factionLabel, deceasedLabel } from "./presentation.ts";
 
 const authDirectory = "./.auth/lordxeno";
 const qrImagePath = `${authDirectory}/whatsapp-qr.png`;
-const sessions = new GameSessions({ tieRule: "no-elimination", revealRoleOnDeath: false }, "./.data/lordxeno-games.json");
+const sessions = new GameSessions({ tieRule: "no-elimination", revealRoleOnDeath: true }, "./.data/lordxeno-games.json");
+const DISCUSSION_MS = 120_000;
 const phaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const phaseDeadlines = new Map<string, number>();
 const duplicateJoinWarnings = new Set<string>();
@@ -36,9 +37,9 @@ function rosterMessage(groupId: string): string {
 }
 
 function nightPrompt(role: string): string {
-  if (role === "werewolf") return "🌑 *NIGHT ACTION*\n\nChoose a living player to target. Reply with !xeno night <player number>.";
-  if (role === "seer") return "🔮 *NIGHT ACTION*\n\nChoose a living player to investigate. Reply with !xeno night <player number>.";
-  if (role === "doctor") return "🩺 *NIGHT ACTION*\n\nChoose a living player to protect. Reply with !xeno night <player number>.";
+  if (role === "werewolf") return "🌑 *NIGHT ACTION*\n\nChoose a living player to target. Reply with !night <player number>.";
+  if (role === "seer") return "🔮 *NIGHT ACTION*\n\nChoose a living player to investigate. Reply with !night <player number>.";
+  if (role === "doctor") return "🩺 *NIGHT ACTION*\n\nChoose a living player to protect. Reply with !night <player number>.";
   return "🌑 *NIGHT*\n\nRest until dawn. No night action is needed from you.";
 }
 
@@ -149,8 +150,9 @@ async function startWhatsApp(): Promise<void> {
       if (message.key.fromMe || !message.message || !message.key.remoteJid) continue;
       const remoteJid = message.key.remoteJid;
       const text = messageText(message.message).trim();
-      const command = text.toLowerCase();
+      const command = normalizeCommand(text);
       const commandName = resolveCommand(command)?.name;
+      if (!commandName) continue;
       const commandKey = `${message.key.remoteJid}:${participantIdentity(message)}:${command}`;
       const lastCommand = commandCooldowns.get(commandKey) ?? 0;
       if (Date.now() - lastCommand < 750) continue;
@@ -170,7 +172,7 @@ async function startWhatsApp(): Promise<void> {
       try {
         if (!message.key.remoteJid.endsWith("@g.us") && commandName === "night") {
           const targetNumber = Number(command.slice("!xeno night ".length).trim());
-          if (!Number.isInteger(targetNumber)) throw new GameError("Choose a player number, for example: !xeno night 2");
+          if (!Number.isInteger(targetNumber)) throw new GameError("Choose a player number, for example: !night 2");
           sessions.submitNightAction(sessions.groupForIdentity(message.key.remoteJid), message.key.remoteJid, targetNumber);
           await safeSend(socket, message.key.remoteJid, "Your night action has been recorded. Await dawn.");
           const actionGroupId = sessions.groupForIdentity(message.key.remoteJid);
@@ -179,7 +181,7 @@ async function startWhatsApp(): Promise<void> {
         }
         if (!message.key.remoteJid.endsWith("@g.us") && commandName === "vote") {
           const targetNumber = Number(command.slice("!xeno vote ".length).trim());
-          if (!Number.isInteger(targetNumber)) throw new GameError("Vote with a player number, for example: !xeno vote 2");
+          if (!Number.isInteger(targetNumber)) throw new GameError("Vote with a player number, for example: !vote 2");
           const voteGroupId = sessions.groupForIdentity(message.key.remoteJid);
           sessions.submitVote(voteGroupId, message.key.remoteJid, targetNumber);
           await safeSend(socket, message.key.remoteJid, "✅ Your vote has been recorded. Await the result.");
@@ -219,8 +221,13 @@ async function startWhatsApp(): Promise<void> {
           const started = sessions.startGame(message.key.remoteJid, groupIdentity);
           await safeSend(socket, message.key.remoteJid, "🌘 *LORDXENO · THE SUMMONING*\n\nYour secret role is arriving by private message. Keep it to yourself.");
           for (const view of started.privateViews) await safeSend(socket, view.player.id, roleMessage(view));
-          void enterPhase(socket, remoteJid, "discussion", "☀️ *DAY 1 · DISCUSSION*\n\nYou have 60 seconds. Discuss in the group; voting opens after the first night.", "night");
+          void enterPhase(socket, remoteJid, "discussion", "☀️ *DAY 1 · DISCUSSION*\n\nYou have 2 minutes. Discuss in the group; voting opens after the first night.", "night");
         } else if (commandName === "status") {
+          const lobby = sessions.snapshot(remoteJid);
+          if (!lobby.started) {
+            await safeSend(socket, remoteJid, lobbyMessage(lobby));
+            continue;
+          }
           const view = sessions.gameSnapshot(remoteJid);
           const seconds = remainingSeconds(remoteJid);
           await safeSend(socket, remoteJid, statusCard(view, seconds));
@@ -234,14 +241,13 @@ async function startWhatsApp(): Promise<void> {
           const deaths = sessions.graveyard(remoteJid);
           const view = sessions.gameSnapshot(remoteJid);
           const message = deaths.length === 0 ? "The graveyard is empty." : deaths.map((death) => {
-            const player = view.players.find((candidate) => candidate.id === death.playerId);
-            return `• ${player?.displayName ?? death.playerId} (${death.cause === "vote" ? "Day vote" : death.cause === "night-attack" ? "Night attack" : "Unknown cause"})`;
+            return `• ${deceasedLabel(view, death.playerId)} (${death.cause === "vote" ? "Day vote" : death.cause === "night-attack" ? "Night attack" : "Unknown cause"})`;
           }).join("\n");
           await safeSend(socket, remoteJid, `🪦 *LORDXENO · GRAVEYARD*\n\n${message}`);
         } else if (commandName === "vote") {
           throw new GameError("Voting happens privately. Check your DM from lordxeno.");
         } else if (commandName === "unvote") {
-          throw new GameError("Retract your vote privately with !xeno unvote in DM.");
+          throw new GameError("Retract your vote privately with !unvote in DM.");
         } else if (commandName === "votes") {
           const tally = sessions.voteSnapshot(remoteJid);
           const view = sessions.gameSnapshot(remoteJid);
@@ -310,7 +316,7 @@ async function enterPhase(socket: ReturnType<typeof makeWASocket>, groupId: stri
     if (phase === "discussion") {
       await setDiscussionAccess(socket, groupId);
       await safeSend(socket, groupId, message);
-      schedulePhaseTimer(groupId, 60_000, () => void enterPhase(socket, groupId, discussionNext, discussionNext === "night" ? "🌑 NIGHT FALLS" : "⚖️ VOTING IS OPEN", "night"), discussionNext);
+      schedulePhaseTimer(groupId, DISCUSSION_MS, () => void enterPhase(socket, groupId, discussionNext, discussionNext === "night" ? "🌑 NIGHT FALLS" : "⚖️ VOTING IS OPEN", "night"), discussionNext);
       return;
     }
     if (phase === "night") {
@@ -342,7 +348,7 @@ async function enterPhase(socket: ReturnType<typeof makeWASocket>, groupId: stri
     await safeSend(socket, groupId, "⚖️ *VOTING IS OPEN*\n\nTime: 60 seconds\nCheck your private messages to vote.\nThe group is locked until the result.");
     const voteTargets = rosterMessage(groupId);
     for (const player of sessions.gameSnapshot(groupId).players.filter((candidate) => candidate.alive)) {
-      await safeSend(socket, player.id, `⚖️ *YOUR VOTE*\n\nTime: 60 seconds\n\n${voteTargets}\n\nReply here: !xeno vote <number>\nUndo: !xeno unvote\n\nExample: !xeno vote 2\nMissing votes are skipped when time runs out.`);
+      await safeSend(socket, player.id, `⚖️ *YOUR VOTE*\n\nTime: 60 seconds\n\n${voteTargets}\n\nReply here: !vote <number>\nUndo: !unvote\n\nExample: !vote 2\nMissing votes are skipped when time runs out.`);
     }
     schedulePhaseTimer(groupId, 60_000, () => void resolveVotePhase(socket, groupId));
   } catch (error) {
@@ -359,13 +365,13 @@ async function resolveNightPhase(socket: ReturnType<typeof makeWASocket>, groupI
     for (const investigation of result.investigations) {
       await safeSend(socket, investigation.seerId, `🔮 DIVINATION RESULT\n\n${publicView.players.find((player) => player.id === investigation.targetId)?.displayName ?? investigation.targetId} belongs to the ${factionLabel(investigation.faction)} faction.`);
     }
-    const deaths = result.deaths.map((id) => publicView.players.find((player) => player.id === id)?.displayName ?? id);
+    const deaths = result.deaths.map((id) => deceasedLabel(publicView, id));
     const dawn = deaths.length ? `🌅 DAWN\n\n${deaths.join(" and ")} did not survive the night.` : "🌅 DAWN\n\nThe darkness recedes. No one was lost this night.";
     if (result.winner) {
       await safeSend(socket, groupId, `${dawn}\n\n${result.winner.toUpperCase()} WINS.`);
       recordCompletedGame(groupId);
     }
-    if (!result.winner) void enterPhase(socket, groupId, "discussion", `${dawn}\n\nDay ${publicView.dayNumber} discussion begins. You have 60 seconds.`, "voting");
+    if (!result.winner) void enterPhase(socket, groupId, "discussion", `${dawn}\n\nDay ${publicView.dayNumber} discussion begins. You have 2 minutes.`, "voting");
   } catch (error) {
     await safeSend(socket, groupId, error instanceof GameError ? error.message : "Night could not be resolved.");
   }
@@ -381,7 +387,7 @@ async function resolveVotePhase(socket: ReturnType<typeof makeWASocket>, groupId
     if (death && sessions.gameSnapshot(groupId).individualWinners.includes(death.id)) {
       await safeSend(socket, groupId, `${death.displayName} achieved their individual lynching win. Other factions can still win.`);
     }
-    await safeSend(socket, groupId, death ? `⚖️ VOTE RESOLVED\n\n${death.displayName} has been eliminated.` : "⚖️ VOTE RESOLVED\n\nNo eligible vote was received or the vote tied.");
+    await safeSend(socket, groupId, death ? `⚖️ VOTE RESOLVED\n\n${deceasedLabel(view, death.id)} has been eliminated.` : "⚖️ VOTE RESOLVED\n\nNo eligible vote was received or the vote tied.");
     if (result.winner) {
       await safeSend(socket, groupId, `${result.winner.toUpperCase()} WINS.`);
       recordCompletedGame(groupId);

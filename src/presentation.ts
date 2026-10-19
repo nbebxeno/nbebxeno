@@ -21,8 +21,8 @@ export function roleCard(view: PrivatePlayerView): string {
     `*${roleLabel(view.role)}*`, `Team: ${factionLabel(view.faction)}`, "",
     view.roleDefinition.description, "",
     "*Your objective*", view.roleDefinition.winCondition, "",
-    ...(action ? ["*At night*", `${action} when your private prompt arrives.`, "Reply here: !xeno night <number>", ""] : view.role === "fool" || view.role === "tanner" ? ["*Your ability*", "No night action. Seek elimination by the daytime vote to earn your personal win.", ""] : ["*Available in this game*", "Discuss and vote. This role’s special power is not active yet.", ""]),
-    "*During voting*", "Reply here: !xeno vote <number>", "Undo your vote: !xeno unvote", "",
+    ...(action ? ["*At night*", `${action} when your private prompt arrives.`, "Reply here: !night <number>", ""] : view.role === "fool" || view.role === "tanner" ? ["*Your ability*", "No night action. Seek elimination by the daytime vote to earn your personal win.", ""] : ["*Available in this game*", "Discuss and vote. This role’s special power is not active yet.", ""]),
+    "*During voting*", "Reply here: !vote <number>", "Undo your vote: !unvote", "",
     "Keep your role secret. Return to the group for discussion."
   ].join("\n");
 }
@@ -35,28 +35,38 @@ export function lobbyCard(snapshot: LobbySnapshot, mode?: GameMode): string {
     `Host: ${host}`, `Mode: ${mode ? roleLabel(mode) : "Waiting for host"}`,
     `Players: ${snapshot.players.length} · minimum 4`, "",
     ...snapshot.players.map((player, index) => `${index + 1}. ${player.displayName}${player.id === snapshot.hostId ? " · host" : ""}`), "",
-    ...(mode ? [needed ? `Waiting for ${needed} more ${needed === 1 ? "player" : "players"}.` : "Ready. The host can start the game.", "", "Join: !xeno join", "Leave: !xeno leave", "Host starts: !xeno startgame"]
-      : ["*Host: choose a mode first*", "!xeno mode beginner", "!xeno mode classic", "!xeno mode chaos"])
+    ...(mode ? [needed ? `Waiting for ${needed} more ${needed === 1 ? "player" : "players"}.` : "Ready. The host can start the game.", "", "Join: !join", "Leave: !leave", "Host starts: !startgame"]
+      : ["*Host: choose a mode first*", "!mode beginner", "!mode classic", "!mode chaos"])
   ].join("\n");
 }
 
-export function rosterCard(view: PublicGameView): string {
+function rosterLines(view: PublicGameView): string[] {
   const living = view.players.filter((player) => player.alive);
   const eliminated = view.players.filter((player) => !player.alive);
   return [
-    "🌒 *LORDXENO · PLAYERS*", "", `*Alive · ${living.length}*`,
+    `*Alive · ${living.length}*`,
     ...living.map((player, index) => `${index + 1}. ${player.displayName}`),
     ...(!living.length ? ["No living players."] : []),
-    ...(eliminated.length ? ["", `*Eliminated · ${eliminated.length}*`, ...eliminated.map((player) => `• ${player.displayName}`)] : [])
-  ].join("\n");
+    ...(eliminated.length ? ["", `*Eliminated · ${eliminated.length}*`, ...eliminated.map((player) => `• ${deceasedLabel(view, player.id)}`)] : [])
+  ];
+}
+
+export function rosterCard(view: PublicGameView): string {
+  return ["🌒 *LORDXENO · PLAYERS*", "", ...rosterLines(view)].join("\n");
+}
+
+export function deceasedLabel(view: PublicGameView, playerId: string): string {
+  const name = view.players.find((player) => player.id === playerId)?.displayName ?? playerId;
+  const role = view.deaths.find((death) => death.playerId === playerId)?.role;
+  return role ? `${name} — ${roleLabel(role)}` : name;
 }
 
 export function statusCard(view: PublicGameView, seconds: number | null): string {
   return ["📜 *LORDXENO · STATUS*", "", `Day ${view.dayNumber} · ${roleLabel(view.phase)}`,
     `Alive: ${view.players.filter((player) => player.alive).length}/${view.players.length}`,
     ...(seconds === null ? [] : [`Time left: ${seconds}s`]), "",
-    view.phase === "voting" ? "Vote privately: !xeno vote <number>" : view.phase === "night" ? "Check your private messages for your night action." : view.phase === "discussion" ? "Discuss in the group. Keep your role secret." : "This game has ended. Start a new lobby with !xeno lobby."
-  ].join("\n");
+    view.phase === "voting" ? "Vote privately: !vote <number>" : view.phase === "night" ? "Check your private messages for your night action." : view.phase === "discussion" ? "Discuss in the group. Keep your role secret." : "This game has ended. Start a new lobby with !lobby.",
+    "", ...rosterLines(view)].join("\n");
 }
 
 export function rolesCard(roles: RoleDefinition[]): string {

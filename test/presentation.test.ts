@@ -31,8 +31,8 @@ test("role cards explain playable actions without promising proposed powers or r
   assert.match(card, /\*Witch\*/);
   assert.match(card, /Team: Village/);
   assert.match(card, /special power is not active yet/);
-  assert.match(card, /!xeno vote <number>/);
-  assert.doesNotMatch(card, /!xeno night|Bayo|Chidi|Dami|UNDEFINED/);
+  assert.match(card, /!vote <number>/);
+  assert.doesNotMatch(card, /!night|Bayo|Chidi|Dami|UNDEFINED/);
   assert.throws(() => {
     witchGame.beginNight();
     witchGame.submitNightAction("ada", { type: "doctor-protect", targetId: "bayo" });

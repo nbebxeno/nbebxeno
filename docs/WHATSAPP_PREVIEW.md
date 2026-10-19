@@ -17,9 +17,9 @@ Players: 3 · minimum 4
 
 Waiting for 1 more player.
 
-Join: !xeno join
-Leave: !xeno leave
-Host starts: !xeno startgame
+Join: !join
+Leave: !leave
+Host starts: !startgame
 ```
 
 ## Private role card
@@ -37,11 +37,11 @@ Help eliminate the Werewolf faction.
 
 *At night*
 Investigate a player when your private prompt arrives.
-Reply here: !xeno night <number>
+Reply here: !night <number>
 
 *During voting*
-Reply here: !xeno vote <number>
-Undo your vote: !xeno unvote
+Reply here: !vote <number>
+Undo your vote: !unvote
 
 Keep your role secret. Return to the group for discussion.
 ```
@@ -63,8 +63,8 @@ Help the Village; one kill potion and one revive potion per game.
 Discuss and vote. This role’s special power is not active yet.
 
 *During voting*
-Reply here: !xeno vote <number>
-Undo your vote: !xeno unvote
+Reply here: !vote <number>
+Undo your vote: !unvote
 
 Keep your role secret. Return to the group for discussion.
 ```
