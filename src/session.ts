@@ -1,4 +1,5 @@
 import { GameEngine, GameError, type GameMode, type GameRules, type NightResolution, type Player, type PrivatePlayerView, type RoleDefinition, ROLE_DATABASE, type VoteSnapshot, type RoleAction } from "./engine.ts";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 export interface LobbySnapshot { groupId: string; hostId: string; players: Player[]; started: boolean; }
@@ -73,9 +74,9 @@ export class GameSessions {
     this.persist();
   }
 
-  kick(groupId: string, requesterId: string, targetIdentity: string): void {
+  kick(groupId: string, requesterId: string, targetIdentity: string, privileged = false): void {
     const session = this.requireLobby(groupId);
-    if (session.hostId !== requesterId) throw new GameError("Only the lobby host can remove players.");
+    if (!privileged && session.hostId !== requesterId) throw new GameError("Only the lobby host can remove players.");
     const targetId = this.resolvePlayerId(groupId, targetIdentity);
     if (session.engine) throw new GameError("Kicking players during an active game is not yet defined.");
     session.players.delete(targetId);
@@ -233,7 +234,29 @@ export class GameSessions {
     const roles = new Set(engine.publicView().players.map((player) => engine.privateView(player.id).role));
     return [...roles].map((role) => ROLE_DATABASE[role]);
   }
-  endGame(groupId: string): void { this.requireStartedGame(groupId).forceEnd(); this.persist(); }
+  manageableGames() {
+    return [...this.sessions.values()].filter((session) => !session.engine || session.engine.publicView().status === "active").map((session) => ({
+      groupId: session.groupId, code: createHash("sha256").update(session.groupId).digest("hex").slice(0, 8),
+      host: session.players.get(session.hostId)?.displayName ?? "Host", players: session.players.size,
+      phase: session.engine?.publicView().phase ?? "lobby"
+    }));
+  }
+  endGame(groupId: string): void {
+    const session = this.requireLobby(groupId);
+    if (session.engine) session.engine.forceEnd();
+    else this.sessions.delete(groupId);
+    this.persist();
+  }
+  victorySummary(groupId: string) {
+    const engine = this.requireStartedGame(groupId);
+    const view = engine.publicView();
+    if (view.status !== "ended") throw new GameError("The game has not ended yet.");
+    const players = view.players.map((player) => ({ ...player, role: engine.privateView(player.id).role, faction: engine.privateView(player.id).faction }));
+    const team = players.filter((player) => view.winner === "neutral"
+      ? player.alive && ["enchantress", "murderer", "poisoner-neutral", "arsonist"].includes(player.role) && view.individualWinners.includes(player.id)
+      : !!view.winner && player.faction === view.winner);
+    return { winner: view.winner, team, personal: players.filter((player) => view.individualWinners.includes(player.id) && !team.some((member) => member.id === player.id)) };
+  }
   graveyard(groupId: string) { return this.requireStartedGame(groupId).publicView().deaths; }
   settings(groupId: string): string[] { return this.requireLobby(groupId).enabledRoles ?? ["werewolf", "villager", "seer", "doctor", "hunter"]; }
   setSettings(groupId: string, roles: string[]): void { this.requireLobby(groupId).enabledRoles = roles; }

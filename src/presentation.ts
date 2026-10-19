@@ -75,3 +75,15 @@ export function statusCard(view: PublicGameView, seconds: number | null): string
 export function rolesCard(roles: RoleDefinition[]): string {
   return ["🎭 *LORDXENO · ROLES IN PLAY*", ...roles.map((role) => `*${roleLabel(role.name)}* · ${factionLabel(role.faction)}\n${role.description}`)].join("\n\n");
 }
+
+export function victoryCard(summary: { winner: Faction | null; team: Array<{ id: string; displayName: string; role: string }>; personal: Array<{ id: string; displayName: string; role: string }> }): string {
+  const heading = summary.winner === "werewolves" ? "🐺 *WEREWOLVES WIN!*"
+    : summary.winner === "village" ? "☀️ *VILLAGE WINS!*"
+    : summary.team.length ? "🌘 *NEUTRAL VICTORY!*" : "🏁 *GAME OVER*";
+  const list = (players: typeof summary.team) => players.map((player, i) => `${i + 1}. ${player.displayName} — ${roleLabel(player.role)}`);
+  return [heading, "",
+    ...(summary.team.length ? ["*Winning team*", ...list(summary.team)] : []),
+    ...(summary.personal.length ? ["", "*Personal winners*", ...list(summary.personal)] : []),
+    ...(!summary.team.length && !summary.personal.length ? ["No winners this game."] : [])
+  ].join("\n");
+}

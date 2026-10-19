@@ -54,3 +54,18 @@ Keep your role and team messages private. Return to the group for discussion.
 ```
 
 All roles now have active or passive mechanics. Use `!actions` in DM for phase-specific choices and numbered targets.
+
+## Victory announcement
+
+```text
+🐺 *WEREWOLVES WIN!*
+
+*Winning team*
+1. Ada — Alpha Werewolf
+2. Bayo — Werewolf
+
+*Personal winners*
+1. Chidi — Fool
+```
+
+Winning faction members are listed even if they died. Personal wins are shown separately from the team result.

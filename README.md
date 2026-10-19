@@ -13,7 +13,7 @@ npm test
 npm run start:whatsapp
 ```
 
-Scan the QR from **WhatsApp → Linked devices → Link a device**. The QR image is also written to `.auth/lordxeno/whatsapp-qr.png`. Keep QR codes and `.auth` private. The linked account's own messages are ignored; test from another player account or a group.
+Scan the QR from **WhatsApp → Linked devices → Link a device**. The QR image is also written to `.auth/lordxeno/whatsapp-qr.png`. Keep QR codes and `.auth` private. The linked account's ordinary gameplay messages are ignored; its control commands `!gm`, `!games`, `!kick`, and `!endgame` are accepted. Test normal gameplay from another player account or a group.
 
 The bot must be a group admin to open/lock group chat. Player admin privileges are never changed. Baileys is an unofficial WhatsApp integration; game-state tests and a simulated connection do not establish live delivery on every device.
 
@@ -99,10 +99,40 @@ Revival restores original role/faction and does not restore spent powers. Witch 
 !stats         Personal statistics
 !leaderboard   Recorded wins
 !chronicle     Village history
-!kick <n>      Remove a lobby player (host must also be group admin)
-!endgame       Emergency stop (group admin)
+!kick <n>      Remove a lobby player (group admin or permanent GM)
+!endgame       Emergency stop (group admin or permanent GM)
+!gm            Check your control privileges
+!games         List games and codes privately (permanent GM)
 !settings      Mode and default-role information
 ```
+
+## Winner announcements and permanent Game Masters
+
+At natural game end, the bot posts **Werewolves win!**, **Village wins!**, or a Neutral result followed by the winning team's names and roles. A faction's deceased members still share its win. Personal winners are listed separately. An exclusive Neutral victory never awards every Neutral a win, and a draw lists no team winner. Group chat is reopened after the result.
+
+Group-admin checks use WhatsApp's verified participant ID, alternate phone/LID identity, participant phone field, owner identity, and admin flags. Phone-number digits are never equated with unrelated LID digits.
+
+Configure a permanent GM locally on the device running the bot:
+
+```bash
+npm run gm -- add YOUR_NUMBER_WITH_COUNTRY_CODE
+npm run gm -- list
+```
+
+Use the full international number, without a leading local zero. The setting is stored in `.data/lordxeno-access.json`, which Git ignores; do not add personal numbers to the public source. Changes take effect without restarting the bot and survive future restarts/updates. To remove access, use `npm run gm -- remove YOUR_NUMBER_WITH_COUNTRY_CODE`.
+
+A permanent GM can use `!kick` and `!endgame` without being a group admin or lobby host. `!endgame` can also cancel a lobby before it starts. It stops phase timers and asks WhatsApp to reopen group chat. If the bot lacks permission to reopen chat, it says so rather than claiming success.
+
+Non-admins cannot send into a locked WhatsApp group, even if they are bot GMs. Use these **in DM** instead:
+
+```text
+!gm                   Check permanent GM access
+!games                List active games/lobbies and stable codes
+!endgame GAME_CODE    Stop the selected game or lobby
+!endgame              Stop your active game, or the only running game if you are GM
+```
+
+The linked bot account itself also has control access. It can send its own control messages while ordinary self-generated gameplay messages remain ignored. GM access never changes a person's WhatsApp admin privileges.
 
 ## Persistence and updating Termux
 

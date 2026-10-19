@@ -11,11 +11,13 @@ test("WhatsApp keeps voting private while locked, suppresses repeat joins, and c
   const handlers = new Map<string, (event: any) => Promise<void>>();
   const sent: Array<{ jid: string; text: string }> = [];
   const settings: string[] = [];
+  let metadata: any = { participants: [{ id: "1@s.whatsapp.net", admin: "admin" }] };
   const socket = {
+    user: { id: "15550002222:3@s.whatsapp.net", lid: "555@lid" },
     ev: { on: (event: string, handler: (event: any) => Promise<void>) => handlers.set(event, handler) },
     sendMessage: async (jid: string, message: { text: string }) => { sent.push({ jid, text: message.text }); },
     groupSettingUpdate: async (_jid: string, setting: string) => { settings.push(setting); },
-    groupMetadata: async () => ({ participants: [{ id: "1@s.whatsapp.net", admin: "admin" }] })
+    groupMetadata: async () => metadata
   };
   (globalThis as any).__part6Socket = socket;
   const hooks = registerHooks({
@@ -48,6 +50,7 @@ test("WhatsApp keeps voting private while locked, suppresses repeat joins, and c
   const advanced = GameEngine.restore(advancedState, { tieRule: "no-elimination", revealRoleOnDeath: true });
   advanced.beginNight();
   mkdirSync(".data");
+  writeFileSync(".data/lordxeno-access.json", JSON.stringify({ gameMasters: ["15550001111@s.whatsapp.net"] }));
   writeFileSync(".data/lordxeno-games.json", JSON.stringify([{ groupId: "advanced@g.us", hostId: advancedIds[0], players: advancedPlayers, aliases: [], engineState: advanced.stateSnapshot(), mode: "chaos", phaseDeadline: Date.now() + 1_000_000 }]));
   try {
     await import("../src/whatsapp.ts");
@@ -109,7 +112,7 @@ test("WhatsApp keeps voting private while locked, suppresses repeat joins, and c
     await send(ids[0], `!vote ${wolfNumber}`, true);
     for (const id of ids.slice(1)) await send(id, `!vote ${wolfNumber}`, true);
     for (let i = 0; i < 15; i++) await setImmediate();
-    assert.ok(sent.some((message) => message.jid === group && message.text === "VILLAGE WINS."));
+    assert.ok(sent.some((message) => message.jid === group && message.text.includes("VILLAGE WINS!")));
     assert.ok(sent.some((message) => message.jid === group && message.text.includes(`${wolf} — Werewolf has been eliminated.`)));
     t.mock.timers.tick(1000);
     await send(ids[0], "!xeno status");
@@ -151,6 +154,55 @@ test("WhatsApp keeps voting private while locked, suppresses repeat joins, and c
     t.mock.timers.tick(60_000);
     for (let i = 0; i < 15; i++) await setImmediate();
     assert.equal(settings.at(-1), "announcement");
+    const control = async (key: any, text: string) => {
+      t.mock.timers.tick(1000);
+      await receive({ messages: [{ key, message: { conversation: text }, pushName: "Controller" }] });
+      for (let i = 0; i < 15; i++) await setImmediate();
+    };
+    const gm = "15550001111@s.whatsapp.net";
+    await control({ remoteJid: "15550009999@s.whatsapp.net" }, "!games");
+    assert.match(sent.at(-1)!.text, /Only a permanent Game Master/);
+    await control({ remoteJid: gm }, "!gm");
+    assert.match(sent.at(-1)!.text, /access: yes/);
+    metadata = { participants: [{ id: "777@lid", phoneNumber: gm, admin: null }] };
+    await control({ remoteJid: "777@lid" }, "!gm");
+    assert.match(sent.at(-1)!.text, /access: yes/, "LID-only GM messages must resolve through trusted metadata");
+    await control({ remoteJid: gm }, "!games");
+    const code = sent.at(-1)!.text.match(/!endgame ([a-f0-9]{8})/)![1];
+    await control({ remoteJid: gm }, `!endgame ${code}`);
+    assert.match(sent.at(-1)!.text, /Game ended/);
+    saved = JSON.parse(readFileSync(".data/lordxeno-games.json", "utf8")).find((game: any) => game.groupId === "advanced@g.us");
+    assert.equal(saved.engineState.status, "ended");
+    assert.equal(settings.at(-1), "not_announcement");
+    const afterStop = sent.length;
+    t.mock.timers.tick(60_000); await setImmediate();
+    assert.equal(sent.length, afterStop, "ending must cancel phase timers");
+
+    // A real admin can use the LID in metadata and the PN in the message.
+    await control({ remoteJid: group, participant: ids[0] }, "!lobby");
+    metadata = { participants: [{ id: "987@lid", phoneNumber: ids[0], isAdmin: true }] };
+    await control({ remoteJid: group, participant: "987@lid", participantAlt: ids[0] }, "!endgame");
+    assert.match(sent.at(-1)!.text, /Game ended/);
+    assert.equal(JSON.parse(readFileSync(".data/lordxeno-games.json", "utf8")).some((game: any) => game.groupId === group), false);
+
+    // A permanent GM is neither an admin nor the lobby host, but can kick/end.
+    metadata = { participants: [{ id: gm, admin: null }] };
+    await control({ remoteJid: group, participant: ids[0] }, "!lobby");
+    await control({ remoteJid: group, participant: ids[0] }, "!mode classic");
+    await control({ remoteJid: group, participant: ids[1] }, "!join");
+    await control({ remoteJid: group, participant: gm }, "!kick 2");
+    assert.match(sent.at(-1)!.text, /removed from the lobby/);
+    await control({ remoteJid: group, participant: ids[1] }, "!endgame");
+    assert.match(sent.at(-1)!.text, /Only a group admin or permanent Game Master/);
+    await control({ remoteJid: group, participant: gm }, "!endgame");
+    assert.match(sent.at(-1)!.text, /Game ended/);
+
+    // The linked account can send its own control command; ordinary own
+    // messages remain ignored, so generated replies cannot join games.
+    await control({ remoteJid: group, participant: ids[0] }, "!lobby");
+    await control({ remoteJid: group, fromMe: true }, "!join");
+    await control({ remoteJid: group, fromMe: true }, "!endgame");
+    assert.match(sent.at(-1)!.text, /Game ended/);
   } finally {
     t.mock.timers.reset();
     hooks.deregister();

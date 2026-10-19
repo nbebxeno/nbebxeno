@@ -3,10 +3,11 @@ import pino from "pino";
 import qrcodeTerminal from "qrcode-terminal";
 import * as qrcodeImage from "qrcode";
 import { GameError } from "./engine.ts";
+import { PermanentGms, canonicalIdentity, matchingParticipant, metadataIsAdmin } from "./access.ts";
 import { GameSessions } from "./session.ts";
 import { StatsStore } from "./stats.ts";
 import { helpText, resolveCommand, normalizeCommand } from "./commands.ts";
-import { roleCard, lobbyCard, rosterCard, statusCard, rolesCard, roleLabel, deceasedLabel } from "./presentation.ts";
+import { roleCard, lobbyCard, rosterCard, statusCard, rolesCard, roleLabel, deceasedLabel, victoryCard } from "./presentation.ts";
 
 const authDirectory = "./.auth/lordxeno";
 const qrImagePath = `${authDirectory}/whatsapp-qr.png`;
@@ -17,6 +18,7 @@ const phaseDeadlines = new Map<string, number>();
 const duplicateJoinWarnings = new Set<string>();
 const commandCooldowns = new Map<string, number>();
 const stats = new StatsStore();
+const permanentGms = new PermanentGms();
 let activeSocket: ReturnType<typeof makeWASocket> | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -36,7 +38,13 @@ function rosterMessage(groupId: string): string {
   return rosterCard(sessions.gameSnapshot(groupId));
 }
 
+function isActiveGame(groupId: string): boolean {
+  try { return sessions.gameSnapshot(groupId).status === "active"; }
+  catch { return false; }
+}
+
 function schedulePhaseTimer(groupId: string, milliseconds: number, callback: () => void, nextPhase?: "night" | "voting"): void {
+  if (!isActiveGame(groupId)) return;
   const previous = phaseTimers.get(groupId);
   if (previous) clearTimeout(previous);
   phaseDeadlines.set(groupId, Date.now() + milliseconds);
@@ -72,13 +80,38 @@ function recordCompletedGame(groupId: string): void {
   stats.addChronicle(`${new Date().toISOString().slice(0, 10)}: ${result.winner} victory in ${groupId}; ${result.players.length} players summoned.`);
 }
 
-async function isGroupAdmin(socket: ReturnType<typeof makeWASocket>, groupId: string, identity: string): Promise<boolean> {
+async function managerAccess(socket: ReturnType<typeof makeWASocket>, groupId: string | undefined, identities: Array<string | null | undefined>, fromMe = false): Promise<"gm" | "admin" | null> {
+  if (fromMe) return "gm"; // This flag is supplied by the linked WhatsApp session.
+  if (permanentGms.has(identities)) return "gm";
+  const resolved = [...identities];
+  for (const identity of identities) {
+    const canonical = canonicalIdentity(identity);
+    if (!canonical) continue;
+    try {
+      const mappings = socket.signalRepository?.lidMapping;
+      const alternate = canonical.endsWith("@lid") ? await mappings?.getPNForLID(canonical) : await mappings?.getLIDForPN(canonical);
+      if (alternate) resolved.push(alternate);
+    } catch { /* Metadata may still provide the verified alternate identity. */ }
+  }
+  if (permanentGms.has(resolved)) return "gm";
+  if (!groupId) {
+    // Some private messages contain only a LID. Resolve it through verified
+    // membership metadata when the session's LID cache is not populated yet.
+    if (resolved.some((identity) => canonicalIdentity(identity)?.endsWith("@lid"))) {
+      for (const game of sessions.manageableGames()) {
+        try {
+          const metadata = await socket.groupMetadata(game.groupId);
+          const participant = matchingParticipant(metadata, resolved);
+          if (participant && permanentGms.has([participant.id, participant.phoneNumber, participant.lid])) return "gm";
+        } catch { /* One unavailable group must not block the remaining checks. */ }
+      }
+    }
+    return null;
+  }
   const metadata = await socket.groupMetadata(groupId);
-  const normalizedIdentity = identity.split("@")[0].replace(/\D/g, "");
-  return metadata.participants.some((participant) => {
-    const normalizedParticipant = participant.id.split("@")[0].replace(/\D/g, "");
-    return (participant.id === identity || normalizedParticipant === normalizedIdentity) && (participant.admin === "admin" || participant.admin === "superadmin");
-  });
+  const participant = matchingParticipant(metadata, resolved);
+  if (participant && permanentGms.has([participant.id, participant.phoneNumber, participant.lid])) return "gm";
+  return metadataIsAdmin(metadata, resolved) ? "admin" : null;
 }
 
 function participantIdentity(message: { key: { participant?: string | null; participantPn?: string | null; participantAlt?: string | null; remoteJid?: string | null } }): string {
@@ -151,12 +184,12 @@ async function startWhatsApp(): Promise<void> {
 
   socket.ev.on("messages.upsert", async ({ messages }) => {
     for (const message of messages) {
-      if (message.key.fromMe || !message.message || !message.key.remoteJid) continue;
+      if (!message.message || !message.key.remoteJid) continue;
       const remoteJid = message.key.remoteJid;
       const text = messageText(message.message).trim();
       const command = normalizeCommand(text);
       const commandName = resolveCommand(command)?.name;
-      if (!commandName) continue;
+      if (!commandName || (message.key.fromMe && !["endgame", "kick", "gm", "games"].includes(commandName))) continue;
       const commandKey = `${message.key.remoteJid}:${participantIdentity(message)}:${command}`;
       const lastCommand = commandCooldowns.get(commandKey) ?? 0;
       if (Date.now() - lastCommand < 750) continue;
@@ -171,9 +204,33 @@ async function startWhatsApp(): Promise<void> {
       }
       const participantAlias = message.key.participant === participantIdentity(message) ? message.key.participantAlt : message.key.participant;
       const joinWarningKey = `${remoteJid}:${participantIdentity(message)}`;
-      const groupIdentity = participantIdentity(message);
+      const groupIdentity = message.key.fromMe ? socket.user?.id ?? participantIdentity(message) : participantIdentity(message);
+      const senderIdentities = [groupIdentity, message.key.participant, message.key.participantAlt, (message.key as { participantPn?: string }).participantPn];
       const sender = { id: groupIdentity, displayName: message.pushName ?? groupIdentity };
       try {
+        if (!remoteJid.endsWith("@g.us") && ["gm", "games", "endgame"].includes(commandName)) {
+          const privateIdentities = [remoteJid, message.key.remoteJidAlt];
+          const permanent = await managerAccess(socket, undefined, privateIdentities, message.key.fromMe ?? false) === "gm";
+          const games = sessions.manageableGames();
+          if (commandName === "gm") {
+            await safeSend(socket, remoteJid, permanent ? "🎮 Permanent Game Master access: yes. Use !games or !endgame here in DM." : "Permanent Game Master access: no. Configure your number locally with the gm setup command.");
+          } else if (commandName === "games") {
+            if (!permanent) throw new GameError("Only a permanent Game Master can list all games.");
+            await safeSend(socket, remoteJid, games.length ? ["🎮 *GM · ACTIVE GAMES*", "", ...games.map((game) => `${game.host}'s game · ${game.phase} · ${game.players} players\n!endgame ${game.code}`)].join("\n") : "No active games or lobbies.");
+          } else {
+            const code = command.slice("!xeno endgame".length).trim();
+            let target = code ? games.find((game) => game.code === code) : undefined;
+            if (!code) {
+              try { const groupId = locatePrivateGame(remoteJid, message.key.remoteJidAlt); target = games.find((game) => game.groupId === groupId); }
+              catch { if (permanent && games.length === 1) target = games[0]; }
+            }
+            if (!target) throw new GameError(permanent ? "Use !games, then !endgame <game-code> to choose a running game or lobby." : "Send !endgame in your group or specify its game code.");
+            if (!permanent && !await managerAccess(socket, target.groupId, privateIdentities, message.key.fromMe ?? false)) throw new GameError("Only a group admin or permanent Game Master can end this game.");
+            await stopGame(socket, target.groupId, message.pushName ?? "Game Master");
+            await safeSend(socket, remoteJid, "🛑 Game ended. The group has been notified.");
+          }
+          continue;
+        }
         if (!remoteJid.endsWith("@g.us") && ["actions", "act", "skip", "myrole"].includes(commandName)) {
           const actionGroupId = locatePrivateGame(remoteJid, message.key.remoteJidAlt);
           if (commandName === "actions") {
@@ -227,7 +284,12 @@ async function startWhatsApp(): Promise<void> {
           continue;
         }
         if (!message.key.remoteJid.endsWith("@g.us") || !command.startsWith("!xeno ")) continue;
-        if (commandName === "lobby") {
+        if (commandName === "games") {
+          throw new GameError("Use !games in DM for private Game Master control.");
+        } else if (commandName === "gm") {
+          const access = await managerAccess(socket, remoteJid, senderIdentities, message.key.fromMe ?? false);
+          await safeSend(socket, remoteJid, access === "gm" ? "🎮 Permanent Game Master access: yes. You can use !endgame and !kick without being a group admin." : access === "admin" ? "You have group-admin access. Permanent Game Master access: no." : "You do not have Game Master or group-admin access.");
+        } else if (commandName === "lobby") {
           clearPhaseTimer(remoteJid);
           await safeSend(socket, message.key.remoteJid, lobbyMessage(sessions.createLobby(message.key.remoteJid, sender)));
           if (participantAlias && participantAlias !== groupIdentity) sessions.registerAlias(remoteJid, groupIdentity, participantAlias);
@@ -302,19 +364,18 @@ async function startWhatsApp(): Promise<void> {
           const entries = stats.leaderboard().map((entry, index) => `${index + 1}. ${entry.id} - ${entry.wins} wins`).join("\n");
           await safeSend(socket, remoteJid, `🏆 LEADERBOARD\n\n${entries || "No players have completed a recorded game yet."}`);
         } else if (commandName === "kick") {
-          if (!await isGroupAdmin(socket, remoteJid, groupIdentity)) throw new GameError("Only a group admin can kick players.");
+          if (!await managerAccess(socket, remoteJid, senderIdentities, message.key.fromMe ?? false)) throw new GameError("Only a group admin or permanent Game Master can kick players.");
           const targetNumber = Number(command.slice("!xeno kick ".length).trim());
           if (!Number.isInteger(targetNumber)) throw new GameError("Kick a lobby player by number.");
           const lobby = sessions.snapshot(remoteJid);
           const target = lobby.players[targetNumber - 1];
           if (!target) throw new GameError("That lobby player number does not exist.");
-          sessions.kick(remoteJid, groupIdentity, target.id);
+          sessions.kick(remoteJid, groupIdentity, target.id, true);
           await safeSend(socket, remoteJid, `${target.displayName} was removed from the lobby.`);
         } else if (commandName === "endgame") {
-          if (!await isGroupAdmin(socket, remoteJid, groupIdentity)) throw new GameError("Only a group admin can end the game.");
-          clearPhaseTimer(remoteJid);
-          sessions.endGame(remoteJid);
-          await safeSend(socket, remoteJid, "⚠️ This game has been force-ended by an admin.");
+          if (!await managerAccess(socket, remoteJid, senderIdentities, message.key.fromMe ?? false)) throw new GameError("Only a group admin or permanent Game Master can end the game. Use !gm to check your access.");
+          if (command !== "!xeno endgame") throw new GameError("In a group, use !endgame without a code. Use game codes only in DM.");
+          await stopGame(socket, remoteJid, sender.displayName);
         } else if (commandName === "settings") {
           await safeSend(socket, remoteJid, `⚙️ *LORDXENO · SETTINGS*\n\nMode: ${roleLabel(sessions.mode(remoteJid) ?? "classic")}\nDefault roles: ${sessions.settings(remoteJid).map(roleLabel).join(", ")}\n\nThe selected mode chooses the role pool. Custom role selection is not available yet.`);
         }
@@ -346,6 +407,13 @@ function resumeSavedTimers(socket: ReturnType<typeof makeWASocket>): void {
   }
 }
 
+async function stopGame(socket: ReturnType<typeof makeWASocket>, groupId: string, actorName: string): Promise<void> {
+  sessions.endGame(groupId);
+  clearPhaseTimer(groupId);
+  const reopened = await setDiscussionAccess(socket, groupId);
+  await safeSend(socket, groupId, `🛑 Game ended by ${actorName}. ${reopened ? "Group chat is open." : "I could not reopen group chat; a group admin needs to open it manually."}`);
+}
+
 async function flushEvents(socket: ReturnType<typeof makeWASocket>, groupId: string): Promise<void> {
   for (const event of sessions.drainEvents(groupId)) await safeSend(socket, event.recipient ?? groupId, event.text);
 }
@@ -355,8 +423,9 @@ async function continueGame(socket: ReturnType<typeof makeWASocket>, groupId: st
   const view = sessions.gameSnapshot(groupId);
   if (view.status === "ended") {
     clearPhaseTimer(groupId);
+    await setDiscussionAccess(socket, groupId);
     if (message) await safeSend(socket, groupId, message);
-    await safeSend(socket, groupId, view.winner === "neutral" ? "The game has ended. Personal winners are announced separately." : `${view.winner?.toUpperCase()} WINS.`);
+    await safeSend(socket, groupId, victoryCard(sessions.victorySummary(groupId)));
     recordCompletedGame(groupId);
     return;
   }
@@ -402,7 +471,8 @@ async function enterPhase(socket: ReturnType<typeof makeWASocket>, groupId: stri
       }
       const current = sessions.gameSnapshot(groupId);
       if (current.status === "ended") {
-        await safeSend(socket, groupId, current.winner === "neutral" ? "The game has ended. See personal winner announcements." : `${current.winner?.toUpperCase()} WINS.`);
+        await setDiscussionAccess(socket, groupId);
+        await safeSend(socket, groupId, victoryCard(sessions.victorySummary(groupId)));
         await flushEvents(socket, groupId); recordCompletedGame(groupId); return;
       }
       const actual = current.phase;
@@ -462,17 +532,21 @@ async function resolveVotePhase(socket: ReturnType<typeof makeWASocket>, groupId
 
 async function setNightAccess(socket: ReturnType<typeof makeWASocket>, groupId: string): Promise<void> {
   try {
+    if (!isActiveGame(groupId)) return;
     await socket.groupSettingUpdate(groupId, "announcement");
+    if (!isActiveGame(groupId)) await setDiscussionAccess(socket, groupId);
   } catch (error) {
     console.error(`Could not lock ${groupId}; the bot may not be a group admin.`, error instanceof Error ? error.message : error);
   }
 }
 
-async function setDiscussionAccess(socket: ReturnType<typeof makeWASocket>, groupId: string): Promise<void> {
+async function setDiscussionAccess(socket: ReturnType<typeof makeWASocket>, groupId: string): Promise<boolean> {
   try {
     await socket.groupSettingUpdate(groupId, "not_announcement");
+    return true;
   } catch (error) {
     console.error(`Could not open ${groupId}; the bot may not be a group admin.`, error instanceof Error ? error.message : error);
+    return false;
   }
 }
 

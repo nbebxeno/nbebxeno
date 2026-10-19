@@ -6,7 +6,8 @@
   "scripts": {
     "start:whatsapp": "node --experimental-strip-types src/whatsapp.ts",
     "test": "node --test --experimental-strip-types",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "gm": "node --experimental-strip-types src/gm-cli.ts"
   },
   "devDependencies": {
     "@types/node": "^26.4.0",
