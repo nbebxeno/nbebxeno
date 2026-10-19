@@ -19,13 +19,15 @@ test("Part 6 catalogue assigns every listed role to exactly the specified factio
   }
 });
 
-test("Chaos reaches every non-Werewolf catalogue role before repeating, with one attacking wolf", () => {
-  const count = Object.values(ROLE_DATABASE).filter((role) => role.faction !== "werewolves").length + 1;
-  for (const random of [() => 0, () => 0.5, () => 0.999999]) {
-    const roles = GameEngine.roleComposition(count, "chaos", random);
-    assert.equal(roles.length, count);
-    assert.equal(new Set(roles).size, count);
-    assert.equal(roles.filter((role) => ROLE_DATABASE[role].faction === "werewolves").length, 1);
+test("all modes scale wolves with players and Chaos respects faction budgets", () => {
+  for (const count of [4, 5, 8, 12, 20, 44]) {
+    for (const mode of ["classic", "beginner", "chaos"] as const) {
+      const roles = GameEngine.roleComposition(count, mode, () => 0.5);
+      assert.equal(roles.length, count);
+      assert.equal(roles.filter((role) => ROLE_DATABASE[role].faction === "werewolves").length, GameEngine.wolfCount(count));
+      if (mode === "chaos") assert.equal(roles.filter((role) => ROLE_DATABASE[role].faction === "neutral").length, Math.max(1, Math.floor(count / 4)));
+      if (mode === "classic" && count >= 8) assert.ok(roles.includes("alpha-werewolf"));
+    }
   }
   assert.notDeepEqual(GameEngine.roleComposition(8, "chaos", () => 0), GameEngine.roleComposition(8, "chaos", () => 0.999999));
 });

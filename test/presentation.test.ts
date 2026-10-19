@@ -7,21 +7,19 @@ import { lobbyCard, roleCard, roleLabel, rosterCard } from "../src/presentation.
 const rules = { tieRule: "no-elimination" as const, revealRoleOnDeath: false };
 const players = ["Ada", "Bayo", "Chidi", "Dami"].map((displayName) => ({ id: displayName.toLowerCase(), displayName }));
 
-test("each unfinished catalogue role has narrative copy and a separate ability proposal", () => {
+test("every catalogue role has implemented status and descriptive copy", () => {
   assert.equal(Object.keys(ROLE_PROPOSALS).length, 55);
   for (const [id, role] of Object.entries(ROLE_DATABASE)) {
     assert.ok(role.description.length > 30, id);
     assert.doesNotMatch(role.description, /UNDEFINED|REQUIRES DESIGN|Catalogued role/, id);
-    if (role.designStatus !== "undefined") continue;
-    assert.ok(ROLE_PROPOSALS[id]?.ability, id);
-    assert.ok(ROLE_PROPOSALS[id]?.winCondition, id);
-    assert.equal(role.activeAbility, null, `proposal must not enable ${id}`);
+    assert.equal(role.designStatus, "defined", id);
+    if (ROLE_PROPOSALS[id]) assert.ok(role.activeAbility, id);
   }
   assert.notEqual(roleLabel("poisoner-werewolf"), roleLabel("poisoner-neutral"));
   assert.notEqual(roleLabel("priest-village"), roleLabel("priest-neutral"));
 });
 
-test("role cards explain playable actions without promising proposed powers or revealing other roles", () => {
+test("role cards explain active powers without revealing other players' roles", () => {
   const game = GameEngine.create(players, rules, () => 0.5);
   const state = game.stateSnapshot();
   state.roles = { ada: "witch", bayo: "werewolf", chidi: "seer", dami: "doctor" };
@@ -30,7 +28,8 @@ test("role cards explain playable actions without promising proposed powers or r
   const card = roleCard(witchGame.privateView("ada"));
   assert.match(card, /\*Witch\*/);
   assert.match(card, /Team: Village/);
-  assert.match(card, /special power is not active yet/);
+  assert.match(card, /!act poison/);
+  assert.match(card, /!actions/);
   assert.match(card, /!vote <number>/);
   assert.doesNotMatch(card, /!night|Bayo|Chidi|Dami|UNDEFINED/);
   assert.throws(() => {

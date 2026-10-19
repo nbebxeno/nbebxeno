@@ -1,4 +1,5 @@
-/** Design proposals for review. These do not enable abilities in the engine. */
+/** Role descriptions and rules adopted from the reviewed design draft.
+ * Executable actions and phase validation live in abilities.ts and engine.ts. */
 export interface RoleProposal {
   description: string;
   ability: string;
@@ -16,7 +17,7 @@ export const ROLE_PROPOSALS: Record<string, RoleProposal> = {
   },
   villager: {
     description: "An ordinary resident with no supernatural gift. Your influence comes from sharp questions, careful listening, and your vote.",
-    ability: "No night power. Participate in discussion and cast one vote each day. Proposal: keep Villager simple rather than adding an unapproved utility power.",
+    ability: "No night power. Participate in discussion and cast one vote each day.",
     winCondition: villageWin
   },
   hunter: {

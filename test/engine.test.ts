@@ -28,10 +28,9 @@ test("rejects duplicate votes and resolves a majority vote", () => {
   assert.equal(engine.publicView().phase, "night");
 });
 
-test("does not resolve an undefined Alpha ability", () => {
+test("small Classic games retain the core pool", () => {
   const engine = GameEngine.create(players, rules, () => 0.99);
-  const alphaId = players.find((player) => engine.privateView(player.id).role === "alpha-werewolf")?.id;
-  if (alphaId) assert.throws(() => engine.submitNightAction(alphaId, { type: "werewolf-target", targetId: "ada" }), GameError);
+  assert.equal(players.some((player) => engine.privateView(player.id).role === "alpha-werewolf"), false);
 });
 
 test("requires every living player to vote", () => {
@@ -54,7 +53,7 @@ test("autoskips a timed vote with no submissions and keeps alive numbering compa
 test("supports beginner and chaos role presets", () => {
   assert.deepEqual(GameEngine.roleComposition(4, "beginner"), ["werewolf", "seer", "villager", "villager"]);
   const chaosRoles = GameEngine.roleComposition(5, "chaos", () => 0.5);
-  assert.equal(chaosRoles[0], "werewolf");
+  assert.equal(chaosRoles[0], "alpha-werewolf");
   assert.equal(chaosRoles.length, 5);
   assert.ok(chaosRoles.every((role) => Object.hasOwn(ROLE_DATABASE, role)));
 });

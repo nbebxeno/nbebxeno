@@ -6,12 +6,12 @@ import { GameError } from "./engine.ts";
 import { GameSessions } from "./session.ts";
 import { StatsStore } from "./stats.ts";
 import { helpText, resolveCommand, normalizeCommand } from "./commands.ts";
-import { roleCard, lobbyCard, rosterCard, statusCard, rolesCard, roleLabel, factionLabel, deceasedLabel } from "./presentation.ts";
+import { roleCard, lobbyCard, rosterCard, statusCard, rolesCard, roleLabel, deceasedLabel } from "./presentation.ts";
 
 const authDirectory = "./.auth/lordxeno";
 const qrImagePath = `${authDirectory}/whatsapp-qr.png`;
 const sessions = new GameSessions({ tieRule: "no-elimination", revealRoleOnDeath: true }, "./.data/lordxeno-games.json");
-const DISCUSSION_MS = 120_000;
+const phaseTransitions = new Set<string>();
 const phaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const phaseDeadlines = new Map<string, number>();
 const duplicateJoinWarnings = new Set<string>();
@@ -34,13 +34,6 @@ function lobbyMessage(snapshot: ReturnType<GameSessions["snapshot"]>): string {
 
 function rosterMessage(groupId: string): string {
   return rosterCard(sessions.gameSnapshot(groupId));
-}
-
-function nightPrompt(role: string): string {
-  if (role === "werewolf") return "🌑 *NIGHT ACTION*\n\nChoose a living player to target. Reply with !night <player number>.";
-  if (role === "seer") return "🔮 *NIGHT ACTION*\n\nChoose a living player to investigate. Reply with !night <player number>.";
-  if (role === "doctor") return "🩺 *NIGHT ACTION*\n\nChoose a living player to protect. Reply with !night <player number>.";
-  return "🌑 *NIGHT*\n\nRest until dawn. No night action is needed from you.";
 }
 
 function schedulePhaseTimer(groupId: string, milliseconds: number, callback: () => void, nextPhase?: "night" | "voting"): void {
@@ -75,7 +68,7 @@ function remainingSeconds(groupId: string): number | null {
 function recordCompletedGame(groupId: string): void {
   const result = sessions.completedRecord(groupId);
   if (!result) return;
-  for (const player of result.players) stats.record(player.id, player.role, player.faction === result.winner || result.individualWinners.includes(player.id), player.lynched, player.alive);
+  for (const player of result.players) stats.record(player.id, player.role, (result.winner !== "neutral" && player.faction === result.winner) || result.individualWinners.includes(player.id), player.lynched, player.alive);
   stats.addChronicle(`${new Date().toISOString().slice(0, 10)}: ${result.winner} victory in ${groupId}; ${result.players.length} players summoned.`);
 }
 
@@ -88,8 +81,19 @@ async function isGroupAdmin(socket: ReturnType<typeof makeWASocket>, groupId: st
   });
 }
 
-function participantIdentity(message: { key: { participant?: string | null; participantPn?: string | null; remoteJid?: string | null } }): string {
-  return message.key.participantPn ?? message.key.participant ?? message.key.remoteJid ?? "";
+function participantIdentity(message: { key: { participant?: string | null; participantPn?: string | null; participantAlt?: string | null; remoteJid?: string | null } }): string {
+  const candidates = [message.key.participantPn, message.key.participantAlt, message.key.participant];
+  return candidates.find((id) => id?.endsWith("@s.whatsapp.net")) ?? message.key.participant ?? message.key.remoteJid ?? "";
+}
+
+function locatePrivateGame(jid: string, alternate?: string | null): string {
+  try { return sessions.groupForIdentity(jid); }
+  catch (error) {
+    if (!alternate || !(error instanceof GameError) || !error.message.startsWith("Unknown player")) throw error;
+    const groupId = sessions.groupForIdentity(alternate);
+    sessions.registerAlias(groupId, sessions.resolvePlayerId(groupId, alternate), jid);
+    return groupId;
+  }
 }
 
 async function safeSend(socket: ReturnType<typeof makeWASocket>, jid: string, text: string): Promise<void> {
@@ -165,31 +169,59 @@ async function startWhatsApp(): Promise<void> {
         await safeSend(socket, message.key.remoteJid, helpText());
         continue;
       }
-      const participantAlias = message.key.participant;
+      const participantAlias = message.key.participant === participantIdentity(message) ? message.key.participantAlt : message.key.participant;
       const joinWarningKey = `${remoteJid}:${participantIdentity(message)}`;
       const groupIdentity = participantIdentity(message);
       const sender = { id: groupIdentity, displayName: message.pushName ?? groupIdentity };
       try {
+        if (!remoteJid.endsWith("@g.us") && ["actions", "act", "skip", "myrole"].includes(commandName)) {
+          const actionGroupId = locatePrivateGame(remoteJid, message.key.remoteJidAlt);
+          if (commandName === "actions") {
+            await safeSend(socket, remoteJid, sessions.actionPrompt(actionGroupId, remoteJid));
+          } else if (commandName === "myrole") {
+            await safeSend(socket, remoteJid, roleMessage(sessions.privateView(actionGroupId, sessions.resolvePlayerId(actionGroupId, remoteJid))));
+          } else {
+            const previousPhase = sessions.gameSnapshot(actionGroupId).phase;
+            if (commandName === "skip") sessions.skipAction(actionGroupId, remoteJid);
+            else {
+              const [ability, ...args] = command.slice("!xeno act ".length).split(" ");
+              sessions.submitRoleAction(actionGroupId, remoteJid, ability, args);
+            }
+            await safeSend(socket, remoteJid, commandName === "skip" ? "Remaining abilities skipped for this phase. Your vote is separate." : "✅ Your ability has been recorded.");
+            await flushEvents(socket, actionGroupId);
+            const phase = sessions.gameSnapshot(actionGroupId).phase;
+            if (!phaseTransitions.has(actionGroupId)) {
+              if (previousPhase === "reaction") await continueGame(socket, actionGroupId);
+              else if (phase === "night" && sessions.allNightActionsSubmitted(actionGroupId)) await resolveNightPhase(socket, actionGroupId, false);
+              else if (phase === "voting" && sessions.allVotesSubmitted(actionGroupId)) await resolveVotePhase(socket, actionGroupId, "all-votes-submitted");
+              else if (commandName === "act" || commandName === "skip") {
+                if (phase === "reaction") await enterReaction(socket, actionGroupId);
+                else if (phase === "ended" || (phase !== "night" && phase !== "voting")) await continueGame(socket, actionGroupId);
+              }
+            }
+          }
+          continue;
+        }
         if (!message.key.remoteJid.endsWith("@g.us") && commandName === "night") {
           const targetNumber = Number(command.slice("!xeno night ".length).trim());
           if (!Number.isInteger(targetNumber)) throw new GameError("Choose a player number, for example: !night 2");
-          sessions.submitNightAction(sessions.groupForIdentity(message.key.remoteJid), message.key.remoteJid, targetNumber);
+          sessions.submitNightAction(locatePrivateGame(remoteJid, message.key.remoteJidAlt), message.key.remoteJid, targetNumber);
           await safeSend(socket, message.key.remoteJid, "Your night action has been recorded. Await dawn.");
-          const actionGroupId = sessions.groupForIdentity(message.key.remoteJid);
-          if (sessions.allNightActionsSubmitted(actionGroupId)) void resolveNightPhase(socket, actionGroupId, false);
+          const actionGroupId = locatePrivateGame(remoteJid, message.key.remoteJidAlt);
+          if (!phaseTransitions.has(actionGroupId) && sessions.allNightActionsSubmitted(actionGroupId)) await resolveNightPhase(socket, actionGroupId, false);
           continue;
         }
         if (!message.key.remoteJid.endsWith("@g.us") && commandName === "vote") {
           const targetNumber = Number(command.slice("!xeno vote ".length).trim());
           if (!Number.isInteger(targetNumber)) throw new GameError("Vote with a player number, for example: !vote 2");
-          const voteGroupId = sessions.groupForIdentity(message.key.remoteJid);
+          const voteGroupId = locatePrivateGame(remoteJid, message.key.remoteJidAlt);
           sessions.submitVote(voteGroupId, message.key.remoteJid, targetNumber);
           await safeSend(socket, message.key.remoteJid, "✅ Your vote has been recorded. Await the result.");
-          if (sessions.allVotesSubmitted(voteGroupId)) void resolveVotePhase(socket, voteGroupId, "all-votes-submitted");
+          if (!phaseTransitions.has(voteGroupId) && sessions.allVotesSubmitted(voteGroupId)) await resolveVotePhase(socket, voteGroupId, "all-votes-submitted");
           continue;
         }
         if (!message.key.remoteJid.endsWith("@g.us") && commandName === "unvote") {
-          const voteGroupId = sessions.groupForIdentity(message.key.remoteJid);
+          const voteGroupId = locatePrivateGame(remoteJid, message.key.remoteJidAlt);
           sessions.unvote(voteGroupId, message.key.remoteJid);
           await safeSend(socket, message.key.remoteJid, "✅ Your vote has been retracted.");
           continue;
@@ -241,9 +273,12 @@ async function startWhatsApp(): Promise<void> {
           const deaths = sessions.graveyard(remoteJid);
           const view = sessions.gameSnapshot(remoteJid);
           const message = deaths.length === 0 ? "The graveyard is empty." : deaths.map((death) => {
-            return `• ${deceasedLabel(view, death.playerId)} (${death.cause === "vote" ? "Day vote" : death.cause === "night-attack" ? "Night attack" : "Unknown cause"})`;
+            return `• ${deceasedLabel(view, death.playerId)} (${death.cause === "undefined" ? "Unknown cause" : roleLabel(death.cause)})`;
           }).join("\n");
           await safeSend(socket, remoteJid, `🪦 *LORDXENO · GRAVEYARD*\n\n${message}`);
+        } else if (["act", "actions", "skip"].includes(commandName)) {
+          await safeSend(socket, groupIdentity, sessions.actionPrompt(remoteJid, groupIdentity));
+          await safeSend(socket, remoteJid, "Your abilities were sent privately. Use powers and !skip in DM.");
         } else if (commandName === "vote") {
           throw new GameError("Voting happens privately. Check your DM from lordxeno.");
         } else if (commandName === "unvote") {
@@ -303,100 +338,126 @@ function resumeSavedTimers(socket: ReturnType<typeof makeWASocket>): void {
       schedulePhaseTimer(game.groupId, milliseconds, () => void enterPhase(socket, game.groupId, nextPhase, nextPhase === "night" ? "Night falls." : "Voting is now open.", "night"), nextPhase);
     } else if (game.phase === "night") {
       schedulePhaseTimer(game.groupId, milliseconds, () => void resolveNightPhase(socket, game.groupId, true));
+    } else if (game.phase === "reaction") {
+      void enterReaction(socket, game.groupId, milliseconds);
     } else if (game.phase === "voting") {
       schedulePhaseTimer(game.groupId, milliseconds, () => void resolveVotePhase(socket, game.groupId));
     }
   }
 }
 
+async function flushEvents(socket: ReturnType<typeof makeWASocket>, groupId: string): Promise<void> {
+  for (const event of sessions.drainEvents(groupId)) await safeSend(socket, event.recipient ?? groupId, event.text);
+}
+
+async function continueGame(socket: ReturnType<typeof makeWASocket>, groupId: string, message?: string): Promise<void> {
+  await flushEvents(socket, groupId);
+  const view = sessions.gameSnapshot(groupId);
+  if (view.status === "ended") {
+    clearPhaseTimer(groupId);
+    if (message) await safeSend(socket, groupId, message);
+    await safeSend(socket, groupId, view.winner === "neutral" ? "The game has ended. Personal winners are announced separately." : `${view.winner?.toUpperCase()} WINS.`);
+    recordCompletedGame(groupId);
+    return;
+  }
+  if (view.phase === "reaction") {
+    if (message) await safeSend(socket, groupId, message);
+    await enterReaction(socket, groupId);
+  } else if (view.phase === "discussion") {
+    const seconds = sessions.discussionMilliseconds(groupId) / 1000;
+    await enterPhase(socket, groupId, "discussion", `${message ? `${message}\n\n` : ""}☀️ *DAY ${view.dayNumber} · DISCUSSION*\n\nYou have ${seconds} seconds.`, "voting");
+  } else if (view.phase === "night") await enterPhase(socket, groupId, "night", "Night falls.");
+}
+
+async function enterReaction(socket: ReturnType<typeof makeWASocket>, groupId: string, milliseconds = 30_000): Promise<void> {
+  if (phaseTransitions.has(groupId)) return;
+  phaseTransitions.add(groupId);
+  clearPhaseTimer(groupId);
+  try {
+    await setNightAccess(socket, groupId);
+    await safeSend(socket, groupId, "A final role action is pending. The game is paused for up to 30 seconds.");
+    for (const id of sessions.reactionActors(groupId)) await safeSend(socket, id, sessions.actionPrompt(groupId, id));
+    if (sessions.gameSnapshot(groupId).phase === "reaction") schedulePhaseTimer(groupId, milliseconds, () => {
+      sessions.expireReactions(groupId);
+      void continueGame(socket, groupId);
+    });
+  } finally { phaseTransitions.delete(groupId); }
+  if (sessions.gameSnapshot(groupId).phase !== "reaction") await continueGame(socket, groupId);
+}
+
 async function enterPhase(socket: ReturnType<typeof makeWASocket>, groupId: string, phase: "discussion" | "night" | "voting", message: string, discussionNext: "night" | "voting" = "night"): Promise<void> {
+  if (phaseTransitions.has(groupId)) return;
+  phaseTransitions.add(groupId);
   clearPhaseTimer(groupId);
   logPhaseTransition(groupId, phase, "phase-entry");
   try {
     if (phase === "discussion") {
       await setDiscussionAccess(socket, groupId);
       await safeSend(socket, groupId, message);
-      schedulePhaseTimer(groupId, DISCUSSION_MS, () => void enterPhase(socket, groupId, discussionNext, discussionNext === "night" ? "🌑 NIGHT FALLS" : "⚖️ VOTING IS OPEN", "night"), discussionNext);
-      return;
-    }
-    if (phase === "night") {
-      if (sessions.gameSnapshot(groupId).phase === "discussion") sessions.beginNight(groupId);
-      if (sessions.gameSnapshot(groupId).status === "ended") {
-        await safeSend(socket, groupId, `${sessions.gameSnapshot(groupId).winner?.toUpperCase()} WINS.`);
-        recordCompletedGame(groupId);
-        return;
+      schedulePhaseTimer(groupId, sessions.discussionMilliseconds(groupId), () => void enterPhase(socket, groupId, discussionNext, discussionNext === "night" ? "🌑 NIGHT FALLS" : "⚖️ VOTING IS OPEN", "night"), discussionNext);
+    } else {
+      if (sessions.gameSnapshot(groupId).phase === "discussion") {
+        if (phase === "night") sessions.beginNight(groupId);
+        else sessions.beginVoting(groupId);
       }
-      else if (sessions.gameSnapshot(groupId).phase !== "night") throw new GameError("Night cannot begin from the current phase.");
+      const current = sessions.gameSnapshot(groupId);
+      if (current.status === "ended") {
+        await safeSend(socket, groupId, current.winner === "neutral" ? "The game has ended. See personal winner announcements." : `${current.winner?.toUpperCase()} WINS.`);
+        await flushEvents(socket, groupId); recordCompletedGame(groupId); return;
+      }
+      const actual = current.phase;
+      if (actual !== "night" && actual !== "voting") throw new GameError("This phase cannot begin now.");
       await setNightAccess(socket, groupId);
-      await safeSend(socket, groupId, "🌑 NIGHT FALLS\n\nDiscussion is closed. Night actions are being requested privately. You have 60 seconds.");
-      const targets = rosterMessage(groupId);
-      for (const actorId of sessions.nightActors(groupId)) {
-        const actorView = sessions.privateView(groupId, actorId);
-        await safeSend(socket, actorId, `${nightPrompt(actorView.role)}\n\nTime remaining: 60 seconds.\n\n${targets}`);
+      await flushEvents(socket, groupId);
+      await safeSend(socket, groupId, actual === "night" ? "🌑 *NIGHT FALLS*\n\nTime: 60 seconds. Check your private messages for your role actions." : "⚖️ *VOTING IS OPEN*\n\nTime: 60 seconds. Vote and use any voting powers privately.");
+      const actors = sessions.actionActors(groupId);
+      for (const player of current.players.filter((player) => player.alive)) {
+        if (actual === "voting") await safeSend(socket, player.id, `⚖️ *YOUR VOTE*\n\nTime: 60 seconds\n\n${rosterMessage(groupId)}\n\nReply here: !vote <number>\nUndo: !unvote\nMissing votes are skipped at timeout.`);
+        if (actors.includes(player.id)) await safeSend(socket, player.id, `${sessions.actionPrompt(groupId, player.id)}\n\nTime: 60 seconds.`);
+        else if (actual === "night") await safeSend(socket, player.id, "🌑 *NIGHT*\n\nYour role has no active choice tonight. Passive powers apply automatically. Wait for dawn.");
       }
-      schedulePhaseTimer(groupId, 60_000, () => void resolveNightPhase(socket, groupId, true));
-      return;
+      schedulePhaseTimer(groupId, 60_000, () => actual === "night" ? void resolveNightPhase(socket, groupId, true) : void resolveVotePhase(socket, groupId));
     }
-    if (sessions.gameSnapshot(groupId).phase === "discussion") sessions.beginVoting(groupId);
-    if (sessions.gameSnapshot(groupId).status === "ended") {
-      await safeSend(socket, groupId, `${sessions.gameSnapshot(groupId).winner?.toUpperCase()} WINS.`);
-      recordCompletedGame(groupId);
-      return;
-    }
-    else if (sessions.gameSnapshot(groupId).phase !== "voting") throw new GameError("Voting cannot begin from the current phase.");
-    await setNightAccess(socket, groupId);
-    await safeSend(socket, groupId, "⚖️ *VOTING IS OPEN*\n\nTime: 60 seconds\nCheck your private messages to vote.\nThe group is locked until the result.");
-    const voteTargets = rosterMessage(groupId);
-    for (const player of sessions.gameSnapshot(groupId).players.filter((candidate) => candidate.alive)) {
-      await safeSend(socket, player.id, `⚖️ *YOUR VOTE*\n\nTime: 60 seconds\n\n${voteTargets}\n\nReply here: !vote <number>\nUndo: !unvote\n\nExample: !vote 2\nMissing votes are skipped when time runs out.`);
-    }
-    schedulePhaseTimer(groupId, 60_000, () => void resolveVotePhase(socket, groupId));
   } catch (error) {
-    await safeSend(socket, groupId, error instanceof GameError ? error.message : "Night could not begin.");
-  }
+    await safeSend(socket, groupId, error instanceof GameError ? error.message : "The phase could not begin.");
+  } finally { phaseTransitions.delete(groupId); }
+  const current = sessions.gameSnapshot(groupId);
+  if (current.phase === "night" && sessions.allNightActionsSubmitted(groupId)) await resolveNightPhase(socket, groupId, false);
+  else if (current.phase === "voting" && sessions.allVotesSubmitted(groupId)) await resolveVotePhase(socket, groupId, "all-votes-submitted");
 }
 
 async function resolveNightPhase(socket: ReturnType<typeof makeWASocket>, groupId: string, force: boolean): Promise<void> {
-  clearPhaseTimer(groupId);
+  if (phaseTransitions.has(groupId)) return;
+  phaseTransitions.add(groupId);
   logPhaseTransition(groupId, "night-resolution", force ? "timer" : "all-actions-submitted");
+  let dawn: string | undefined;
   try {
     const result = sessions.resolveNight(groupId, force);
-    const publicView = sessions.gameSnapshot(groupId);
-    for (const investigation of result.investigations) {
-      await safeSend(socket, investigation.seerId, `🔮 DIVINATION RESULT\n\n${publicView.players.find((player) => player.id === investigation.targetId)?.displayName ?? investigation.targetId} belongs to the ${factionLabel(investigation.faction)} faction.`);
-    }
-    const deaths = result.deaths.map((id) => deceasedLabel(publicView, id));
-    const dawn = deaths.length ? `🌅 DAWN\n\n${deaths.join(" and ")} did not survive the night.` : "🌅 DAWN\n\nThe darkness recedes. No one was lost this night.";
-    if (result.winner) {
-      await safeSend(socket, groupId, `${dawn}\n\n${result.winner.toUpperCase()} WINS.`);
-      recordCompletedGame(groupId);
-    }
-    if (!result.winner) void enterPhase(socket, groupId, "discussion", `${dawn}\n\nDay ${publicView.dayNumber} discussion begins. You have 2 minutes.`, "voting");
+    clearPhaseTimer(groupId);
+    const view = sessions.gameSnapshot(groupId);
+    const deaths = result.deaths.map((id) => deceasedLabel(view, id));
+    dawn = deaths.length ? `🌅 *DAWN*\n\n${deaths.join("\n")} did not survive the night.` : "🌅 *DAWN*\n\nNo one was lost this night.";
   } catch (error) {
     await safeSend(socket, groupId, error instanceof GameError ? error.message : "Night could not be resolved.");
-  }
+  } finally { phaseTransitions.delete(groupId); }
+  if (dawn) await continueGame(socket, groupId, dawn);
 }
 
 async function resolveVotePhase(socket: ReturnType<typeof makeWASocket>, groupId: string, trigger: "timer" | "all-votes-submitted" | "manual" = "timer"): Promise<void> {
+  if (phaseTransitions.has(groupId)) return;
+  phaseTransitions.add(groupId);
   logPhaseTransition(groupId, "vote-resolution", trigger);
+  let resolved = false;
   try {
     const result = sessions.resolveVote(groupId, trigger === "timer");
     clearPhaseTimer(groupId);
     const view = sessions.gameSnapshot(groupId);
-    const death = result.eliminatedPlayerId ? view.players.find((player) => player.id === result.eliminatedPlayerId) : null;
-    if (death && sessions.gameSnapshot(groupId).individualWinners.includes(death.id)) {
-      await safeSend(socket, groupId, `${death.displayName} achieved their individual lynching win. Other factions can still win.`);
-    }
-    await safeSend(socket, groupId, death ? `⚖️ VOTE RESOLVED\n\n${deceasedLabel(view, death.id)} has been eliminated.` : "⚖️ VOTE RESOLVED\n\nNo eligible vote was received or the vote tied.");
-    if (result.winner) {
-      await safeSend(socket, groupId, `${result.winner.toUpperCase()} WINS.`);
-      recordCompletedGame(groupId);
-    } else {
-      void enterPhase(socket, groupId, "night", "🌑 NIGHT FALLS", "night");
-    }
+    await safeSend(socket, groupId, result.eliminatedPlayerId ? `⚖️ VOTE RESOLVED\n\n${deceasedLabel(view, result.eliminatedPlayerId)} has been eliminated.` : "⚖️ VOTE RESOLVED\n\nNo player was eliminated by the vote.");
+    resolved = true;
   } catch (error) {
     await safeSend(socket, groupId, error instanceof GameError ? error.message : "Voting could not be resolved.");
-  }
+  } finally { phaseTransitions.delete(groupId); }
+  if (resolved) await continueGame(socket, groupId);
 }
 
 async function setNightAccess(socket: ReturnType<typeof makeWASocket>, groupId: string): Promise<void> {

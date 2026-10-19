@@ -12,6 +12,9 @@ const exact = (...commands: string[]) => (command: string) => commands.includes(
 const prefix = (value: string) => (command: string) => command.startsWith(value);
 
 export const COMMAND_REGISTRY: readonly CommandDefinition[] = [
+  { name: "actions", group: "game", usage: "!actions (DM)", description: "Show your current powers and numbered targets.", matches: exact("!xeno actions") },
+  { name: "act", group: "game", usage: "!act <ability> [targets/options] (DM)", description: "Use a power in its permitted phase.", matches: prefix("!xeno act ") },
+  { name: "skip", group: "game", usage: "!skip (DM)", description: "Pass on remaining powers this phase; voting is separate.", matches: exact("!xeno skip") },
   { name: "help", group: "meta", usage: "!help", description: "Show available commands.", matches: exact("!xeno help") },
   { name: "ping", group: "meta", usage: "!ping", description: "Check the transport connection.", matches: exact("!xeno ping") },
   { name: "lobby", group: "setup", usage: "!lobby", description: "Create a game lobby.", matches: exact("!xeno lobby") },

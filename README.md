@@ -1,168 +1,118 @@
 # lordxeno
 
-Transport-agnostic engine for **lordxeno**, a Xenoverse supernatural social-deduction game designed for WhatsApp.
+A WhatsApp supernatural social-deduction game with private role cards, isolated group sessions, timed discussion/voting/night phases, a 58-role catalogue, and saved game recovery.
 
-The first implementation keeps critical game state in code so a future WhatsApp adapter can handle messages and DMs without becoming the rules engine. The current slice supports isolated group games, randomized core-role assignment, public/private state projections, day-to-vote progression, vote resolution, and validated night-action submission.
+## Run
 
-The transport now supports independent simultaneous games by WhatsApp group. Each group owns its lobby, engine, aliases, phase timers, votes, and night actions. A completed game can be replaced in the same group without affecting other groups.
-
-## Development
+Use a recent Node.js release with TypeScript type stripping (Node 22.18+ or 24+).
 
 ```bash
-npm install
-npm test
+npm ci
 npm run typecheck
+npm test
 npm run start:whatsapp
 ```
 
-The engine is in [src/engine.ts](src/engine.ts), with behavior checks in [test/engine.test.ts](test/engine.test.ts).
+Scan the QR from **WhatsApp → Linked devices → Link a device**. The QR image is also written to `.auth/lordxeno/whatsapp-qr.png`. Keep QR codes and `.auth` private. The linked account's own messages are ignored; test from another player account or a group.
 
-## WhatsApp smoke test
+The bot must be a group admin to open/lock group chat. Player admin privileges are never changed. Baileys is an unofficial WhatsApp integration; game-state tests and a simulated connection do not establish live delivery on every device.
 
-The prototype transport is in [src/whatsapp.ts](src/whatsapp.ts). Run `npm run start:whatsapp`, scan the displayed QR code in WhatsApp under **Linked devices**, then send `!ping` to the linked account from a test group or DM. The session is stored locally under `.auth/` and is ignored by Git.
-
-This currently verifies connectivity and the initial lobby flow. The Baileys transport is a prototype integration pending a production WhatsApp provider decision.
-
-## First game test
-
-Add the paired account to a test group, then use these commands in the group:
+## Start a game
 
 ```text
 !lobby
 !mode classic
 !join
 !players
-!startgame
+!start
 ```
 
-The person who creates the lobby is the host. The host must choose `classic`, `beginner`, or `chaos` before other players join. At least four unique players must join, and only the host can start; WhatsApp admin status is not required. Starting sends the public summoning message to the group and each role card privately to its player.
+The lobby creator is host and is already joined. The host chooses `beginner`, `classic`, or `chaos`, then starts once at least four unique players are present. `!startgame` also works. Short commands are case-insensitive; old `!xeno ...` commands remain supported. Ordinary unprefixed chat is ignored.
 
-## Day voting test
+## Modes and pack size
 
-After the discussion timer ends, voting opens automatically. The group remains locked and each living player receives a private voting prompt with the current alive roster number:
+Werewolf faction seats scale as `max(1, floor(players / 4))`: 4–7 players have one, 8–11 have two, 12–15 have three, and so on. Supported lobby size is 4–100. This is the implementation's explicit balance policy, pending the original Part 2 specification and playtesting.
+
+- **Beginner:** regular Werewolves, a Seer, and Villagers.
+- **Classic:** an Alpha replaces one regular wolf when there are multiple wolves; add Seer, Doctor, Hunter (five players or more), and Villagers.
+- **Chaos:** starts with an Alpha, draws the other Werewolf faction seats from all wolf roles, limits Neutral seats to one per four players (minimum one), and fills the remaining seats from the Village catalogue. Roles are sampled without replacement in each faction pool; exhausted pools use regular Werewolf, Fool, or Villager fillers. When possible, a drawn Mason receives a second Mason companion. Every catalogue role can appear across Chaos games.
+
+One pack attack is shared by all attack-capable wolves. Their target votes are tallied together; a top tie means no shared kill. Helpers do not gain an attack solely from faction membership. Alpha conversion replaces the entire shared attack for that night, can target Village players only, and is blocked by Doctor protection. A converted player keeps their original role and gains pack-attack participation.
+
+Private role cards show known pack members by name and role. Minion knows the attacking wolves without being revealed to them. Sorcerer, Lone Wolf, and Confused Wolf retain their documented knowledge restrictions; Confused Wolf can discover teammates through its power. Newly converted players can use `!myrole` privately to see their team.
+
+## Phases and role actions
+
+- Discussion: **120 seconds**, group chat open. The first discussion leads to night; later discussions lead to voting.
+- Voting: **60 seconds**, group locked. Each eligible living player submits `!vote <number>` by DM; `!unvote` retracts it.
+- Night: **60 seconds**, group locked. Each player receives a private prompt for available powers, or a rest message for passive roles.
+- Death reaction: **30 seconds**, group locked. A dead Hunter can shoot; a Vengeful Ghost can mark a revenge target before the game continues. Unanswered reactions expire safely.
+- Hangman's one-time retrial: **30 seconds** of extra discussion followed by a fresh vote.
+
+Use these privately:
 
 ```text
-!vote 2
+!actions                    Your available powers and numbered targets
+!act attack 3               Shared pack target vote
+!act convert 3              Alpha's one-time conversion
+!act protect 2              Doctor protection
+!act see 4                  Seer investigation
+!act compare 2 4            Apprentice Seer faction comparison
+!act poison 3               Witch or Poisoner power
+!act revive 1               A dead-target number from the separate dead list
+!act defend 2               Lawyer power during voting
+!act allegiance village     Turncoat victory choice
+!act ignite                 Arsonist ignition, no target
+!act shoot 3                Dead Hunter's final shot
+!skip                       Pass on remaining abilities in this phase
 ```
 
-Send that command to lordxeno by DM, not in the group. Use `!unvote` by DM to retract a vote. Group-chat votes and retractions are rejected; the bot never promotes or demotes players to enable voting.
+The prompt is authoritative: only powers available to your role, phase, remaining uses, and eligible targets are accepted. Multi-target selections must use distinct numbers. One-use powers remain spent after restart or revival. Witch chooses one potion per night; Arsonist chooses douse or ignite. First-night selections expire if skipped.
 
-When every living player has voted, any player may send:
+`!night <number>` remains a shortcut for pack attack, Seer investigation, Doctor protection, or a simple single-target role power. Use `!act` when a role has multiple powers or multiple targets.
+
+A phase closes early only after everyone has submitted the required choices or used `!skip`. Skipping powers does **not** cast or skip a voting ballot. A player with a voting power must use it or explicitly skip it before all-vote early closure. Missing choices are skipped at timeout. Passive effects such as Old Man endurance, Mason knowledge, Hierophant counts, Mortician results, and death-triggered abilities apply automatically.
+
+The Old Crone's silence is an announced social rule: WhatsApp cannot selectively stop one player's group messages while permitting everyone else's. Private powers and voting still work for a silenced player.
+
+## Deaths, information, and victory
+
+Deaths reveal the deceased's role in announcements, `!graveyard`, `!players`, and `!status`. Living-player roles and private investigations are never added to public rosters. `!status` includes a numbered living roster and the eliminated list, as well as phase and time remaining.
+
+Wolf attacks use consensus. Night resolution sets up protections and marks, applies pack attack or conversion, independent attacks, ignition, poison, eligible revivals, day effects and private information, then pauses for death reactions before final victory checks. Conflicting same-priority actions use original seat order, so network arrival order does not choose the outcome.
+
+Fool/Tanner lynching wins, Chef/Priest progress, Hoodlum revenge, Ghost revenge, and other personal outcomes are tracked separately from faction victory. Independent killers keep ordinary faction victory from ending an unresolved killing threat. Enchantress and last-surviving independent killers have exclusive Neutral victories; this does not award every Neutral a win. Moderator, Orphan, Turncoat, Thespian, Cupid, and Guardian Angel have explicit personal co-win rules. See [the role rules](docs/ROLE_PROPOSALS.md) for every role's ability and objective.
+
+Revival restores original role/faction and does not restore spent powers. Witch can revive an eligible death from the immediately preceding night; Necromancer can revive an eligible earlier night death. Voting deaths and completed personal lynching wins cannot be revived.
+
+## Other commands
 
 ```text
-!resolve
+!help          All command groups
+!ping          Connection check
+!leave         Leave the lobby
+!myrole        Private role/team reminder (group or DM)
+!roles         Descriptions of roles in this game, without player assignments
+!votes         Current tally
+!resolve       Resolve a fully submitted vote
+!night-resolve Resolve a fully submitted night
+!stats         Personal statistics
+!leaderboard   Recorded wins
+!chronicle     Village history
+!kick <n>      Remove a lobby player (host must also be group admin)
+!endgame       Emergency stop (group admin)
+!settings      Mode and default-role information
 ```
 
-The first and later discussion phases last 120 seconds (2 minutes). Voting and night phases last 60 seconds. Voting closes immediately when all eligible players vote; night closes immediately when all required actions arrive. Missing votes and night actions are autoskipped at timeout. Voting is not available during the first discussion. The current configured tie policy is no elimination. Manual `!resolve` requires every living vote; only the phase timeout skips missing votes, so an early manual request cannot cancel the voting timer.
+## Persistence and updating Termux
 
-## Night action test
+`.auth/`, `.data/`, and `node_modules/` are ignored by Git. Active sessions save roles, factions, aliases, ballots, role targets, spent powers, marks, personal wins, pending death reactions, and phase deadlines. Restart restores state and re-arms timers without restoring consumed powers. Existing deadline durations are retained; new discussions use two minutes. Do not run two bot processes against the same saved-game directory.
 
-After voting resolves, Werewolves, the Seer, and the Doctor receive private prompts. They reply to lordxeno by DM:
-
-```text
-!night 2
-```
-
-The number refers to the current living-player roster shown in the group and in the DM. Eliminated players are listed separately and do not consume a target number. Night lasts 60 seconds; it resolves automatically even if a player does not submit an action. You can also resolve early by sending this in the group:
-
-```text
-!night-resolve
-```
-
-The Seer receives their result privately. Dawn and voting announcements reveal the role of each deceased player. Living players’ roles remain private. The graveyard, player roster, and status also show roles for eliminated players.
-
-## Commands and roles
-
-Command definitions live in [src/commands.ts](src/commands.ts). The WhatsApp transport resolves incoming messages through that registry, and `!help` is generated from the same entries, grouped by setup, game, voting, meta, and admin. Duplicate command names fail during module initialization.
-
-The role database in [src/engine.ts](src/engine.ts) includes the full requested catalogue, with separate IDs for `poisoner-werewolf`, `poisoner-neutral`, `priest-village`, and `priest-neutral`. Fool is explicitly Neutral. Classic and Beginner use their controlled core pools; Chaos randomly draws from its eligible catalogue pool without replacement from all 43 non-Werewolf catalogue roles, while preserving the existing single attacking Werewolf baseline. Classic and Beginner retain their existing compositions pending Part 2’s eligibility and balance rules. Chaos can assign unfinished catalogue roles; their missing abilities are not implemented by this selection change. Catalogue entries whose mechanics are not yet specified remain marked `UNDEFINED - REQUIRES DESIGN`.
-
-## Reliability and recovery
-
-The WhatsApp process uses a file-backed session store at `.data/lordxeno-games.json`. Active games are keyed by WhatsApp group ID and save players, aliases, roles, alive/dead state, votes, submitted night actions, and phase deadlines after meaningful changes. On reconnect or process restart, active group timers are re-armed from their saved deadlines.
-
-Required night actions and votes never block a timed phase forever: an expired night resolves with missing actions skipped. Votes and night actions send confirmations, and repeated identical commands from one sender are throttled briefly to protect the game state.
-
-## Automatic phase loop
-
-The first and later discussion phases last 120 seconds (2 minutes). Voting and night phases last 60 seconds. Missing votes and night actions are autoskipped. Every transition re-arms the next timer and private role prompts.
-
-The bot must be a group admin for phase locking. During discussion it opens the group for everyone; during night and voting it switches the group to admin-only messaging. Player admin roles are never changed. If WhatsApp refuses the setting change, the game continues and the failure is logged instead of crashing the process.
-
-## Command reference
-
-Commands are case-insensitive. Use short commands such as `!join`, `!status`, and `!vote 2`. The older `!xeno join`, `!xeno status`, and other `!xeno` commands remain supported. Send `!myrole` in the group to receive a role reminder by DM; ordinary unprefixed chat is ignored.
-
-```text
-!help          List commands
-!join          Join the lobby
-!mode <preset> Host chooses classic, beginner, or chaos
-!leave         Leave before the game starts
-!startgame     Host-only game start
-!players       Show lobby or living roster
-!status        Show phase, timer, and full player list
-!roles         Show one-line summaries of roles in play
-!myrole        DM your role and ability reminder
-!graveyard     Show public deaths
-!vote <number> Cast a vote during voting
-!unvote        Retract your vote
-!votes         Show the current tally
-!stats         Show persistent personal stats
-!chronicle     Show Village Chronicle entries
-!leaderboard   Show persistent top players
-!kick <number> Admin-only lobby removal
-!endgame       Admin-only emergency stop
-!settings      Show group role settings
-```
-
-Stats and Chronicle data is stored in `.data/lordxeno-stats.json` and is ignored by Git. Role settings are currently read-only until the role-composition system supports per-group role pools.
-
-## Current scope
-## Current role set
-
-The role database records all six confirmed core roles. The default role composition uses the defined mechanics only:
-
-- 4 players: Werewolf, Seer, Doctor, Villager
-- 5 players: the four above plus Hunter
-- 6+ players: the five-player set plus Villagers
-
-Alpha Werewolf is recorded as a rare role, but is not assigned by the default composition because its additional ability is not designed yet. The Villager utility ability and Hunter death-trigger behavior are likewise marked undefined and are not silently implemented.
-
-## Information boundaries
-These mechanics still require design before they can be made canonical:
-
-
-Phase transitions log the group, timestamp, phase, and trigger (`timer`, `all-votes-submitted`, `all-actions-submitted`, or manual) to the process output for diagnosing future cycle failures.
-- WhatsApp provider/library, command syntax, lobby, timers, and persistence
-- Alpha Werewolf ability, Villager utility, and complete Hunter resolution
-- Night-action priority and resolution, including Werewolf coordination
-- Death-reveal policy, conversion, curses, additional factions, and advanced roles
-- AFK/disconnect handling, admin controls, narration generation, and recovery
-
-The engine uses `no-elimination` for voting ties. The WhatsApp bot enables role reveals on death; other integrations can disable them using `revealRoleOnDeath: false`. Living roles remain private in either mode.
-
-
-## Part 6 implementation notes
-
-- Repeated joins never add another roster entry. The bot sends one “already in the lobby” warning per player/group until that player successfully rejoins or the process restarts. Leaving and kicking clear identity aliases so returning players can join again.
-- All 58 catalogue roles have explicit faction mappings, including separate Poisoner and Priest IDs. Fool and Tanner record individual lynching wins independently of the eventual faction result. These outcomes survive game saves and count toward personal wins when the faction game completes; other Neutral objectives remain unspecified.
-- Chaos samples the entire non-Werewolf catalogue uniformly without replacement, refilling only after exhaustion. This spreads selections beyond the previous eight-role subset and varies even four-player games. Werewolf variants remain outside the selection pool because their abilities and attack coordination are unfinished.
-- Part 2 is still needed to finalize each mode’s eligible pool, rare-role weights, and player-count balance. The existing one-Werewolf composition is provisional, especially for larger groups. Classic and Beginner composition changes and undefined individual objectives require those missing rules.
-- The simulated WhatsApp test checks group locking, private voting prompts, DM votes/retractions, duplicate join replies, and early resolution. It does not establish live WhatsApp connectivity.
-
-## WhatsApp message design and role proposals
-
-The bot uses shared WhatsApp message templates in `src/presentation.ts` for role cards, lobbies, rosters, role summaries, and status. Cards use readable role/faction names and explain where to send commands. Lobbies show the selected mode and the next step instead of always asking the host to pick a mode.
-
-See [message previews](docs/WHATSAPP_PREVIEW.md) and [the 55 role proposals](docs/ROLE_PROPOSALS.md). Every unfinished role now has distinct narrative copy. Proposed abilities and objectives are stored separately in `src/role-proposals.ts` for review; they do not enable special powers or change win logic. Unfinished cards say that their special power is not active yet. Existing Werewolf, Seer, Doctor, and Fool/Tanner behavior remains as described above.
-
-## Updating the bot in Termux
-
-Stop the running bot with Ctrl+C, then run these commands from `~/lordxeno`:
+Stop the bot with Ctrl+C and update from `~/lordxeno`:
 
 ```bash
 git pull --ff-only origin codex/part6-voting-and-lobby
 npm run start:whatsapp
 ```
 
-Your local `.auth` pairing and `.data` game saves are ignored by Git and are retained. Existing saved phase deadlines keep their remaining time; newly scheduled discussions use two minutes.
+Pairing and game saves remain in place. Start a fresh game to receive the new mode composition; an existing game's assigned roles are preserved.

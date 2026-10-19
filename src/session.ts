@@ -1,4 +1,4 @@
-import { GameEngine, GameError, type GameMode, type GameRules, type NightResolution, type Player, type PrivatePlayerView, type RoleDefinition, ROLE_DATABASE, type VoteSnapshot } from "./engine.ts";
+import { GameEngine, GameError, type GameMode, type GameRules, type NightResolution, type Player, type PrivatePlayerView, type RoleDefinition, ROLE_DATABASE, type VoteSnapshot, type RoleAction } from "./engine.ts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 export interface LobbySnapshot { groupId: string; hostId: string; players: Player[]; started: boolean; }
@@ -92,23 +92,16 @@ export class GameSessions {
 
   resolvePlayerId(groupId: string, identity: string): string {
     const session = this.requireLobby(groupId);
-    if (session.players.has(identity)) return identity;
-    const aliased = session.aliases.get(identity);
-    if (aliased) return aliased;
-    const normalized = identity.split("@")[0].replace(/\D/g, "");
-    const match = [...session.players.keys()].find((id) => id.split("@")[0].replace(/\D/g, "") === normalized);
-    if (match) return match;
-    throw new GameError("Unknown player. Send !xeno join in the game group first.");
+    const playerId = this.lobbyPlayerId(session, identity);
+    if (playerId) return playerId;
+    throw new GameError("Unknown player. Send !join in the game group first.");
   }
 
   groupForIdentity(identity: string): string {
-    for (const [groupId, session] of this.sessions) {
-      if (session.engine?.publicView().status !== "active") continue;
-      if (session.players.has(identity) || session.aliases.has(identity)) return groupId;
-      const normalized = identity.split("@")[0].replace(/\D/g, "");
-      if ([...session.players.keys()].some((id) => id.split("@")[0].replace(/\D/g, "") === normalized)) return groupId;
-    }
-    throw new GameError("Unknown player. Send !xeno join in the game group first.");
+    const matches = [...this.sessions.entries()].filter(([, session]) => session.engine?.publicView().status === "active" && this.lobbyPlayerId(session, identity));
+    if (matches.length > 1) throw new GameError("You are in multiple active games. Finish or end the other game before sending private actions.");
+    if (matches.length === 1) return matches[0][0];
+    throw new GameError("Unknown player. Send !join in the game group first.");
   }
 
   snapshot(groupId: string): LobbySnapshot {
@@ -131,15 +124,65 @@ export class GameSessions {
   beginNight(groupId: string): void { this.requireStartedGame(groupId).beginNight(); this.persist(); }
 
   allVotesSubmitted(groupId: string): boolean {
-    const engine = this.requireStartedGame(groupId);
-    const view = engine.publicView();
-    return view.phase === "voting" && view.players.filter((player) => player.alive).every((player) => engine.voteSnapshot().submitted[player.id]);
+    return this.requireStartedGame(groupId).allVotesSubmitted();
   }
 
   allNightActionsSubmitted(groupId: string): boolean {
-    const engine = this.requireStartedGame(groupId);
-    return engine.requiredNightActors().every((playerId) => engine.stateSnapshot().nightActions[playerId]);
+    return this.requireStartedGame(groupId).allNightActionsSubmitted();
   }
+
+  availableActions(groupId: string, identity: string) {
+    return this.requireStartedGame(groupId).availableActions(this.resolvePlayerId(groupId, identity));
+  }
+  actionActors(groupId: string): string[] {
+    const engine = this.requireStartedGame(groupId);
+    return engine.publicView().players.filter((player) => engine.availableActions(player.id).length > 0).map((player) => player.id);
+  }
+  actionPrompt(groupId: string, identity: string): string {
+    const engine = this.requireStartedGame(groupId);
+    const id = this.resolvePlayerId(groupId, identity);
+    const actions = engine.availableActions(id);
+    const alive = engine.numberedAlivePlayers().map((entry) => `${entry.number}. ${entry.player.displayName}`).join("\n");
+    const dead = engine.numberedDeadPlayers().map((entry) => `${entry.number}. ${entry.player.displayName}`).join("\n");
+    const lines = ["🌑 *YOUR ACTIONS*", "", `Phase: ${engine.publicView().phase}`, ""];
+    for (const action of actions) {
+      const args = action.targetKind === "option" ? (action.id === "allegiance" ? "<village|werewolves>" : "<1|2|3>") : Array.from({ length: action.targets }, (_, i) => `<${action.targetKind === "dead" ? "dead " : ""}number${action.targets > 1 ? ` ${i + 1}` : ""}>`).join(" ");
+      lines.push(`!act ${action.id}${args ? ` ${args}` : ""}`, action.help, "");
+    }
+    if (!actions.length) lines.push("No active ability is available to you in this phase.", "");
+    lines.push("*Living targets*", alive || "None.");
+    if (actions.some((action) => action.targetKind === "dead")) lines.push("", "*Dead targets · separate numbering*", dead || "None.");
+    lines.push("", ...engine.privateView(id).personalNotes ?? [], "Use !skip to pass on remaining abilities this phase. Your vote is separate.");
+    return lines.join("\n");
+  }
+  submitRoleAction(groupId: string, identity: string, ability: string, arguments_: string[]): void {
+    const engine = this.requireStartedGame(groupId);
+    const id = this.resolvePlayerId(groupId, identity);
+    const definition = engine.availableActions(id).find((entry) => entry.id === ability);
+    if (!definition) throw new GameError("That ability is unavailable. Use !actions to see your choices.");
+    const action: RoleAction = { ability, targets: [] };
+    if (definition.targetKind === "option") {
+      if (arguments_.length !== 1) throw new GameError("Choose exactly one option from your prompt.");
+      action.option = arguments_[0];
+    } else {
+      if (arguments_.length !== definition.targets) throw new GameError(`This ability needs ${definition.targets} player number(s).`);
+      const roster = definition.targetKind === "dead" ? engine.numberedDeadPlayers() : engine.numberedAlivePlayers();
+      action.targets = arguments_.map((argument) => {
+        if (!/^\d+$/.test(argument)) throw new GameError("Use whole player numbers from your prompt.");
+        const target = roster.find((entry) => entry.number === Number(argument));
+        if (!target) throw new GameError("That target number does not exist. Use !actions for the current list.");
+        return target.player.id;
+      });
+    }
+    engine.submitAction(id, action); this.persist();
+  }
+  skipAction(groupId: string, identity: string): void {
+    this.requireStartedGame(groupId).skipAction(this.resolvePlayerId(groupId, identity)); this.persist();
+  }
+  discussionMilliseconds(groupId: string): number { return this.requireStartedGame(groupId).discussionMilliseconds(); }
+  drainEvents(groupId: string) { const events = this.requireStartedGame(groupId).drainEvents(); this.persist(); return events; }
+  expireReactions(groupId: string): void { this.requireStartedGame(groupId).expireReactions(); this.persist(); }
+  reactionActors(groupId: string): string[] { return this.requireStartedGame(groupId).reactionActors(); }
 
   phaseDeadline(groupId: string): number | undefined { return this.requireLobby(groupId).phaseDeadline; }
   setMode(groupId: string, requesterId: string, mode: GameMode): void {
@@ -165,7 +208,7 @@ export class GameSessions {
     const engine = this.requireStartedGame(groupId);
     const voterId = this.resolvePlayerId(groupId, voterIdentity);
     const target = engine.numberedAlivePlayers().find((entry) => entry.number === targetNumber)?.player;
-    if (!target) throw new GameError("Vote target must be a living player number from !xeno players.");
+    if (!target) throw new GameError("Vote target must be a living player number from !players.");
     engine.submitVote(voterId, target.id);
     this.persist();
   }
@@ -216,11 +259,11 @@ export class GameSessions {
     const engine = this.requireStartedGame(groupId);
     const actorId = this.resolvePlayerId(groupId, actorIdentity);
     const target = engine.numberedAlivePlayers().find((entry) => entry.number === targetNumber)?.player;
-    if (!target) throw new GameError("Night target must be a living player number from !xeno players.");
-    const role = engine.privateView(actorId).role;
-    const actionType = role === "werewolf" ? "werewolf-target" : role === "seer" ? "seer-investigate" : role === "doctor" ? "doctor-protect" : null;
-    if (!actionType) throw new GameError("Your role has no defined night action.");
-    engine.submitNightAction(actorId, { type: actionType, targetId: target.id });
+    if (!target) throw new GameError("Night target must be a living player number from !players.");
+    const available = engine.availableActions(actorId);
+    const legacy = available.find((action) => ["attack", "see", "protect"].includes(action.id)) ?? available.find((action) => action.targets === 1 && !action.targetKind);
+    if (!legacy) throw new GameError("Use !actions and !act for your role's available choices.");
+    engine.submitAction(actorId, { ability: legacy.id, targets: [target.id] });
     this.persist();
   }
 

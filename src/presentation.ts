@@ -15,15 +15,18 @@ export function factionLabel(faction: Faction): string {
 }
 
 export function roleCard(view: PrivatePlayerView): string {
-  const action = view.role === "werewolf" ? "Choose a target" : view.role === "seer" ? "Investigate a player" : view.role === "doctor" ? "Protect a player" : null;
+  const abilities = view.abilities ?? [];
   return [
     "🌑 *LORDXENO · SECRET ROLE*", "",
     `*${roleLabel(view.role)}*`, `Team: ${factionLabel(view.faction)}`, "",
-    view.roleDefinition.description, "",
-    "*Your objective*", view.roleDefinition.winCondition, "",
-    ...(action ? ["*At night*", `${action} when your private prompt arrives.`, "Reply here: !night <number>", ""] : view.role === "fool" || view.role === "tanner" ? ["*Your ability*", "No night action. Seek elimination by the daytime vote to earn your personal win.", ""] : ["*Available in this game*", "Discuss and vote. This role’s special power is not active yet.", ""]),
+    view.roleDefinition.description, "", "*Your objective*", view.roleDefinition.winCondition, "",
+    ...(view.faction === "werewolves" ? ["*Your known Werewolf team*", ...(view.knownTeam?.length ? view.knownTeam.map((ally) => `• ${ally.displayName} — ${roleLabel(ally.role)}`) : ["No other pack members are known to you."]), ""] : []),
+    ...(view.personalNotes?.length ? [...view.personalNotes, ""] : []),
+    "*Your abilities*", view.roleDefinition.activeAbility ?? "No active power. Discuss, deduce, and vote.", "",
+    ...abilities.map((ability) => `${roleLabel(ability.phase)}: !act ${ability.id}${ability.targetKind === "option" ? " <option>" : " <number>".repeat(ability.targets)} — ${ability.help}`), "",
+    "Use !actions for your current choices and numbered targets.", "Use !skip to pass on remaining powers this phase.", "",
     "*During voting*", "Reply here: !vote <number>", "Undo your vote: !unvote", "",
-    "Keep your role secret. Return to the group for discussion."
+    "Keep your role and team messages private. Return to the group for discussion."
   ].join("\n");
 }
 

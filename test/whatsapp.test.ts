@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { registerHooks } from "node:module";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
+import { GameEngine, ROLE_DATABASE } from "../src/engine.ts";
 
 test("WhatsApp keeps voting private while locked, suppresses repeat joins, and closes on the last DM vote", async (t) => {
   const handlers = new Map<string, (event: any) => Promise<void>>();
@@ -37,6 +38,17 @@ test("WhatsApp keeps voting private while locked, suppresses repeat joins, and c
   process.chdir(directory);
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
   t.mock.timers.tick(1000);
+  const advancedIds = Array.from({ length: 9 }, (_, i) => `${i + 10}@s.whatsapp.net`);
+  const advancedPlayers = advancedIds.map((id) => ({ id, displayName: id }));
+  const advancedRoles = ["werewolf", "alpha-werewolf", "doctor", "seer", "hunter", "murderer", "villager", "villager", "villager"];
+  const advancedState = GameEngine.create(advancedPlayers, { tieRule: "no-elimination", revealRoleOnDeath: true }).stateSnapshot();
+  advancedState.roles = Object.fromEntries(advancedIds.map((id, i) => [id, advancedRoles[i]]));
+  advancedState.factions = Object.fromEntries(advancedIds.map((id, i) => [id, ROLE_DATABASE[advancedRoles[i]].faction]));
+  delete advancedState.runtime;
+  const advanced = GameEngine.restore(advancedState, { tieRule: "no-elimination", revealRoleOnDeath: true });
+  advanced.beginNight();
+  mkdirSync(".data");
+  writeFileSync(".data/lordxeno-games.json", JSON.stringify([{ groupId: "advanced@g.us", hostId: advancedIds[0], players: advancedPlayers, aliases: [], engineState: advanced.stateSnapshot(), mode: "chaos", phaseDeadline: Date.now() + 1_000_000 }]));
   try {
     await import("../src/whatsapp.ts");
     await setImmediate();
@@ -103,6 +115,42 @@ test("WhatsApp keeps voting private while locked, suppresses repeat joins, and c
     await send(ids[0], "!xeno status");
     assert.match(sent.at(-1)!.text, /Eliminated · 1/);
     assert.ok(sent.at(-1)!.text.includes(`${wolf} — Werewolf`));
+    // An active saved game with multiple wolves and a Neutral killer exercises
+    // the real private-action parser, LID/PN aliasing, and death-action timer.
+    const dm = async (id: string, text: string, alt?: string) => {
+      await receive({ messages: [{ key: { remoteJid: id, remoteJidAlt: alt }, message: { conversation: text }, pushName: id }] });
+      for (let i = 0; i < 15; i++) await setImmediate();
+    };
+    await dm("999@lid", "!actions", advancedIds[0]);
+    assert.ok(sent.some((message) => message.jid === "999@lid" && message.text.includes("!act attack")));
+    await dm("999@lid", "!act attack 8");
+    await dm(advancedIds[1], "!act convert 7");
+    await dm(advancedIds[2], "!act protect 3");
+    await dm(advancedIds[3], "!act see 1");
+    await dm(advancedIds[5], "!act kill 5");
+    assert.ok(sent.some((message) => message.jid === advancedIds[3] && message.text.includes("appears werewolves-aligned")));
+    assert.ok(sent.some((message) => message.jid === advancedIds[6] && message.text.includes("converted you")));
+    assert.ok(sent.some((message) => message.jid === advancedIds[4] && message.text.includes("!act shoot")));
+    assert.equal(settings.at(-1), "announcement");
+    let saved = JSON.parse(readFileSync(".data/lordxeno-games.json", "utf8")).find((game: any) => game.groupId === "advanced@g.us");
+    assert.equal(saved.engineState.phase, "reaction");
+    assert.ok(saved.phaseDeadline > Date.now());
+    await handlers.get("connection.update")!({ connection: "open" });
+    for (let i = 0; i < 15; i++) await setImmediate();
+    await dm(advancedIds[4], "!act shoot 1");
+    assert.equal(settings.at(-1), "not_announcement");
+    saved = JSON.parse(readFileSync(".data/lordxeno-games.json", "utf8")).find((game: any) => game.groupId === "advanced@g.us");
+    assert.equal(saved.engineState.phase, "discussion");
+    assert.equal(saved.phaseDeadline - Date.now(), 120_000);
+    assert.equal(saved.engineState.alive.includes(advancedIds[0]), false);
+    await dm(advancedIds[6], "!myrole");
+    assert.ok(sent.some((message) => message.jid === advancedIds[6] && message.text.includes(`${advancedIds[1]} — Alpha Werewolf`)));
+    t.mock.timers.tick(60_000);
+    await setImmediate();
+    assert.equal(settings.at(-1), "not_announcement");
+    t.mock.timers.tick(60_000);
+    for (let i = 0; i < 15; i++) await setImmediate();
+    assert.equal(settings.at(-1), "announcement");
   } finally {
     t.mock.timers.reset();
     hooks.deregister();

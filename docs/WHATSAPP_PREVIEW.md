@@ -1,7 +1,5 @@
 # WhatsApp message preview
 
-Plain-text previews of the bot messages. WhatsApp renders the single-asterisk labels in bold.
-
 ## Lobby
 
 ```text
@@ -22,49 +20,37 @@ Leave: !leave
 Host starts: !startgame
 ```
 
-## Private role card
+## Private Alpha role card
 
 ```text
 🌑 *LORDXENO · SECRET ROLE*
 
-*Seer*
-Team: Village
+*Alpha Werewolf*
+Team: Werewolf
 
-Investigates one player each night and receives an alignment result.
+The pack's elder, feared for turning the Village's own people against it.
 
 *Your objective*
-Help eliminate the Werewolf faction.
+Win with the Werewolf faction when living Werewolves reach parity with all other living players.
 
-*At night*
-Investigate a player when your private prompt arrives.
-Reply here: !night <number>
+*Your known Werewolf team*
+• Bayo — Werewolf
+• Chidi — Werewolf
+
+*Your abilities*
+Once per game, replace the pack attack with an attempted conversion of a Village player. Doctor protection blocks conversion. The target keeps their role label but becomes Werewolf-aligned and learns the pack; do not convert Neutral roles.
+
+Night: !act attack <number> — Vote for the shared pack target. Tied pack votes mean no attack.
+Night: !act convert <number> — Convert a Village player instead of this night's pack attack (once).
+
+Use !actions for your current choices and numbered targets.
+Use !skip to pass on remaining powers this phase.
 
 *During voting*
 Reply here: !vote <number>
 Undo your vote: !unvote
 
-Keep your role secret. Return to the group for discussion.
+Keep your role and team messages private. Return to the group for discussion.
 ```
 
-## Unfinished role card
-
-```text
-🌑 *LORDXENO · SECRET ROLE*
-
-*Witch*
-Team: Village
-
-A keeper of dangerous remedies, with one chance to save a life and one to take it.
-
-*Your objective*
-Help the Village; one kill potion and one revive potion per game.
-
-*Available in this game*
-Discuss and vote. This role’s special power is not active yet.
-
-*During voting*
-Reply here: !vote <number>
-Undo your vote: !unvote
-
-Keep your role secret. Return to the group for discussion.
-```
+All roles now have active or passive mechanics. Use `!actions` in DM for phase-specific choices and numbered targets.
