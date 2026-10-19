@@ -50,7 +50,7 @@ export function resolveCommand(command: string): CommandDefinition | undefined {
 
 export function helpText(): string {
   const groups: Array<[CommandGroup, string]> = [["setup", "SETUP"], ["game", "GAME"], ["voting", "VOTING"], ["meta", "META / STATS"], ["admin", "ADMIN"]];
-  return groups.map(([group, title]) => [
+  return "🌑 *LORDXENO · COMMANDS*\n\nGroup chat: lobby, discussion, and game info.\nPrivate chat: votes and night actions.\n\n" + groups.map(([group, title]) => [
     `*${title}*`,
     ...COMMAND_REGISTRY.filter((command) => command.group === group).map((command) => `${command.usage} - ${command.description}`)
   ].join("\n")).join("\n\n");

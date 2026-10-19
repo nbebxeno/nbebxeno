@@ -6,6 +6,7 @@ import { GameError } from "./engine.ts";
 import { GameSessions } from "./session.ts";
 import { StatsStore } from "./stats.ts";
 import { helpText, resolveCommand } from "./commands.ts";
+import { roleCard, lobbyCard, rosterCard, statusCard, rolesCard, roleLabel, factionLabel } from "./presentation.ts";
 
 const authDirectory = "./.auth/lordxeno";
 const qrImagePath = `${authDirectory}/whatsapp-qr.png`;
@@ -23,37 +24,22 @@ function messageText(message: { conversation?: string | null; extendedTextMessag
 }
 
 function roleMessage(view: ReturnType<GameSessions["startGame"]>["privateViews"][number]): string {
-  return [
-    "🌑 LORDXENO — SECRET ROLE",
-    "",
-    `Role: ${view.role}`,
-    `Faction: ${view.faction}`,
-    "",
-    view.roleDefinition.description,
-    view.roleDefinition.activeAbility ? `Ability: ${view.roleDefinition.activeAbility}` : "No active night ability is currently defined.",
-    `Win condition: ${view.roleDefinition.winCondition}`,
-    "",
-    "Keep this message private. The game begins in the group."
-  ].join("\n");
+  return roleCard(view);
 }
 
 function lobbyMessage(snapshot: ReturnType<GameSessions["snapshot"]>): string {
-  const players = snapshot.players.map((player, index) => `${index + 1}. ${player.displayName}`).join("\n");
-  return `🌒 XENOVERSE LOBBY\n\nPlayers (${snapshot.players.length}/4 minimum):\n${players}\n\nThe host must choose a mode with !xeno mode classic, !xeno mode beginner, or !xeno mode chaos before starting.`;
+  return lobbyCard(snapshot, sessions.mode(snapshot.groupId));
 }
 
 function rosterMessage(groupId: string): string {
-  const view = sessions.gameSnapshot(groupId);
-  const alive = sessions.numberedAlivePlayers(groupId).map((entry) => `${entry.number}. ${entry.player.displayName}`).join("\n");
-  const eliminated = view.players.filter((player) => !player.alive).map((player) => `- ${player.displayName} (eliminated)`).join("\n");
-  return `🌒 XENOVERSE ROSTER\n\n${alive || "No living players."}${eliminated ? `\n\n${eliminated}` : ""}`;
+  return rosterCard(sessions.gameSnapshot(groupId));
 }
 
 function nightPrompt(role: string): string {
-  if (role === "werewolf") return "🌑 NIGHT ACTION\n\nChoose a living player to target. Reply with !xeno night <player number>.";
-  if (role === "seer") return "🔮 NIGHT ACTION\n\nChoose a living player to investigate. Reply with !xeno night <player number>.";
-  if (role === "doctor") return "🩺 NIGHT ACTION\n\nChoose a living player to protect. Reply with !xeno night <player number>.";
-  return "🌑 NIGHT\n\nYou have no defined night action. Remain silent until dawn.";
+  if (role === "werewolf") return "🌑 *NIGHT ACTION*\n\nChoose a living player to target. Reply with !xeno night <player number>.";
+  if (role === "seer") return "🔮 *NIGHT ACTION*\n\nChoose a living player to investigate. Reply with !xeno night <player number>.";
+  if (role === "doctor") return "🩺 *NIGHT ACTION*\n\nChoose a living player to protect. Reply with !xeno night <player number>.";
+  return "🌑 *NIGHT*\n\nRest until dawn. No night action is needed from you.";
 }
 
 function schedulePhaseTimer(groupId: string, milliseconds: number, callback: () => void, nextPhase?: "night" | "voting"): void {
@@ -209,13 +195,13 @@ async function startWhatsApp(): Promise<void> {
         if (!message.key.remoteJid.endsWith("@g.us") || !command.startsWith("!xeno ")) continue;
         if (commandName === "lobby") {
           clearPhaseTimer(remoteJid);
-          await safeSend(socket, message.key.remoteJid, `${lobbyMessage(sessions.createLobby(message.key.remoteJid, sender))}\n\nThe lobby is waiting for the host's mode selection.`);
+          await safeSend(socket, message.key.remoteJid, lobbyMessage(sessions.createLobby(message.key.remoteJid, sender)));
           if (participantAlias && participantAlias !== groupIdentity) sessions.registerAlias(remoteJid, groupIdentity, participantAlias);
         } else if (commandName === "mode") {
           const mode = command.slice("!xeno mode ".length).trim();
           if (mode !== "classic" && mode !== "beginner" && mode !== "chaos") throw new GameError("Choose classic, beginner, or chaos.");
           sessions.setMode(remoteJid, groupIdentity, mode);
-          await safeSend(socket, remoteJid, `🎭 Game mode set to ${mode}. Players may now join the lobby.`);
+          await safeSend(socket, remoteJid, lobbyMessage(sessions.snapshot(remoteJid)));
         } else if (commandName === "join") {
           if (!sessions.mode(remoteJid)) throw new GameError("The host must choose a game mode before players join.");
           const lobby = sessions.joinLobby(remoteJid, sender);
@@ -231,16 +217,15 @@ async function startWhatsApp(): Promise<void> {
           await safeSend(socket, message.key.remoteJid, lobby.started ? rosterMessage(message.key.remoteJid) : lobbyMessage(lobby));
         } else if (commandName === "start") {
           const started = sessions.startGame(message.key.remoteJid, groupIdentity);
-          await safeSend(socket, message.key.remoteJid, "🌘 THE SUMMONING BEGINS\n\nThe players have been gathered. Check your private messages. The first discussion begins now. You have 60 seconds.");
+          await safeSend(socket, message.key.remoteJid, "🌘 *LORDXENO · THE SUMMONING*\n\nYour secret role is arriving by private message. Keep it to yourself.");
           for (const view of started.privateViews) await safeSend(socket, view.player.id, roleMessage(view));
-          void enterPhase(socket, remoteJid, "discussion", "The first discussion begins. You have 60 seconds.", "night");
+          void enterPhase(socket, remoteJid, "discussion", "☀️ *DAY 1 · DISCUSSION*\n\nYou have 60 seconds. Discuss in the group; voting opens after the first night.", "night");
         } else if (commandName === "status") {
           const view = sessions.gameSnapshot(remoteJid);
           const seconds = remainingSeconds(remoteJid);
-          await safeSend(socket, remoteJid, `📜 STATUS\n\nPhase: ${view.phase}\nTime remaining: ${seconds === null ? "not timed" : `${seconds}s`}\nAlive: ${view.players.filter((player) => player.alive).length}/${view.players.length}`);
+          await safeSend(socket, remoteJid, statusCard(view, seconds));
         } else if (commandName === "roles") {
-          const roles = sessions.roleSummaries(remoteJid).map((role) => `• ${role.name}: ${role.description}`).join("\n");
-          await safeSend(socket, remoteJid, `🎭 ROLES IN THIS GAME\n\n${roles}`);
+          await safeSend(socket, remoteJid, rolesCard(sessions.roleSummaries(remoteJid)));
         } else if (commandName === "myrole") {
           const view = sessions.privateView(remoteJid, groupIdentity);
           await safeSend(socket, groupIdentity, roleMessage(view));
@@ -250,9 +235,9 @@ async function startWhatsApp(): Promise<void> {
           const view = sessions.gameSnapshot(remoteJid);
           const message = deaths.length === 0 ? "The graveyard is empty." : deaths.map((death) => {
             const player = view.players.find((candidate) => candidate.id === death.playerId);
-            return `• ${player?.displayName ?? death.playerId} (${death.cause})`;
+            return `• ${player?.displayName ?? death.playerId} (${death.cause === "vote" ? "Day vote" : death.cause === "night-attack" ? "Night attack" : "Unknown cause"})`;
           }).join("\n");
-          await safeSend(socket, remoteJid, `🪦 GRAVEYARD\n\n${message}`);
+          await safeSend(socket, remoteJid, `🪦 *LORDXENO · GRAVEYARD*\n\n${message}`);
         } else if (commandName === "vote") {
           throw new GameError("Voting happens privately. Check your DM from lordxeno.");
         } else if (commandName === "unvote") {
@@ -269,7 +254,7 @@ async function startWhatsApp(): Promise<void> {
         } else if (commandName === "stats") {
           const current = stats.get(groupIdentity);
           const favorite = Object.entries(current.roles).sort((left, right) => right[1] - left[1])[0]?.[0] ?? "none";
-          await safeSend(socket, remoteJid, `📊 STATS\n\nGames: ${current.games}\nWins: ${current.wins}\nWin rate: ${current.games ? Math.round(current.wins / current.games * 100) : 0}%\nLynched: ${current.lynched}\nSurvived to end: ${current.survived}\nMost played role: ${favorite}`);
+          await safeSend(socket, remoteJid, `📊 STATS\n\nGames: ${current.games}\nWins: ${current.wins}\nWin rate: ${current.games ? Math.round(current.wins / current.games * 100) : 0}%\nLynched: ${current.lynched}\nSurvived to end: ${current.survived}\nMost played role: ${favorite === "none" ? "None yet" : roleLabel(favorite)}`);
         } else if (commandName === "chronicle") {
           await safeSend(socket, remoteJid, `📖 VILLAGE CHRONICLE\n\n${stats.chronicle().join("\n") || "No legends have been recorded yet."}`);
         } else if (commandName === "leaderboard") {
@@ -290,7 +275,7 @@ async function startWhatsApp(): Promise<void> {
           sessions.endGame(remoteJid);
           await safeSend(socket, remoteJid, "⚠️ This game has been force-ended by an admin.");
         } else if (commandName === "settings") {
-          await safeSend(socket, remoteJid, `⚙️ SETTINGS\n\nEnabled roles: ${sessions.settings(remoteJid).join(", ")}\n\nRole toggles are reserved for the role-composition pass.`);
+          await safeSend(socket, remoteJid, `⚙️ *LORDXENO · SETTINGS*\n\nMode: ${roleLabel(sessions.mode(remoteJid) ?? "classic")}\nDefault roles: ${sessions.settings(remoteJid).map(roleLabel).join(", ")}\n\nThe selected mode chooses the role pool. Custom role selection is not available yet.`);
         }
       } catch (error) {
         if (commandName === "join" && error instanceof GameError && error.message === "You're already in the lobby.") {
@@ -354,10 +339,10 @@ async function enterPhase(socket: ReturnType<typeof makeWASocket>, groupId: stri
     }
     else if (sessions.gameSnapshot(groupId).phase !== "voting") throw new GameError("Voting cannot begin from the current phase.");
     await setNightAccess(socket, groupId);
-    await safeSend(socket, groupId, "⚖️ VOTING IS OPEN\n\nVoting instructions have been sent privately. The group remains locked until the result.");
+    await safeSend(socket, groupId, "⚖️ *VOTING IS OPEN*\n\nTime: 60 seconds\nCheck your private messages to vote.\nThe group is locked until the result.");
     const voteTargets = rosterMessage(groupId);
     for (const player of sessions.gameSnapshot(groupId).players.filter((candidate) => candidate.alive)) {
-      await safeSend(socket, player.id, `⚖️ VOTING\n\nYou have 60 seconds. Reply with !xeno vote <player number>. Missing votes are skipped.\n\n${voteTargets}`);
+      await safeSend(socket, player.id, `⚖️ *YOUR VOTE*\n\nTime: 60 seconds\n\n${voteTargets}\n\nReply here: !xeno vote <number>\nUndo: !xeno unvote\n\nExample: !xeno vote 2\nMissing votes are skipped when time runs out.`);
     }
     schedulePhaseTimer(groupId, 60_000, () => void resolveVotePhase(socket, groupId));
   } catch (error) {
@@ -372,7 +357,7 @@ async function resolveNightPhase(socket: ReturnType<typeof makeWASocket>, groupI
     const result = sessions.resolveNight(groupId, force);
     const publicView = sessions.gameSnapshot(groupId);
     for (const investigation of result.investigations) {
-      await safeSend(socket, investigation.seerId, `🔮 DIVINATION RESULT\n\n${publicView.players.find((player) => player.id === investigation.targetId)?.displayName ?? investigation.targetId} belongs to the ${investigation.faction} faction.`);
+      await safeSend(socket, investigation.seerId, `🔮 DIVINATION RESULT\n\n${publicView.players.find((player) => player.id === investigation.targetId)?.displayName ?? investigation.targetId} belongs to the ${factionLabel(investigation.faction)} faction.`);
     }
     const deaths = result.deaths.map((id) => publicView.players.find((player) => player.id === id)?.displayName ?? id);
     const dawn = deaths.length ? `🌅 DAWN\n\n${deaths.join(" and ")} did not survive the night.` : "🌅 DAWN\n\nThe darkness recedes. No one was lost this night.";

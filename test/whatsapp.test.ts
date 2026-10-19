@@ -61,9 +61,9 @@ test("WhatsApp keeps voting private while locked, suppresses repeat joins, and c
     await send(ids[0], "!xeno startgame");
     const roleCards = sent.filter((message) => message.text.includes("SECRET ROLE"));
     assert.equal(roleCards.length, 5);
-    const wolf = roleCards.find((message) => message.text.includes("Role: werewolf\n"))!.jid;
-    const seer = roleCards.find((message) => message.text.includes("Role: seer\n"))!.jid;
-    const doctor = roleCards.find((message) => message.text.includes("Role: doctor\n"))!.jid;
+    const wolf = roleCards.find((message) => message.text.includes("*Werewolf*\n"))!.jid;
+    const seer = roleCards.find((message) => message.text.includes("*Seer*\n"))!.jid;
+    const doctor = roleCards.find((message) => message.text.includes("*Doctor*\n"))!.jid;
     t.mock.timers.tick(60_000);
     for (let i = 0; i < 15; i++) await setImmediate();
     assert.equal(settings.at(-1), "announcement");
@@ -76,7 +76,7 @@ test("WhatsApp keeps voting private while locked, suppresses repeat joins, and c
     t.mock.timers.tick(60_000);
     for (let i = 0; i < 15; i++) await setImmediate();
     assert.equal(settings.at(-1), "announcement");
-    assert.equal(sent.filter((message) => message.jid !== group && message.text.includes("⚖️ VOTING\n")).length, 5);
+    assert.equal(sent.filter((message) => message.jid !== group && message.text.includes("⚖️ *YOUR VOTE*\n")).length, 5);
     await send(ids[0], "!xeno vote 2");
     assert.match(sent.at(-1)!.text, /Voting happens privately/);
     await send(ids[0], "!xeno resolve");

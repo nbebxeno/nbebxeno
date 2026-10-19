@@ -1,3 +1,5 @@
+import { ROLE_PROPOSALS } from "./role-proposals.ts";
+
 export type PlayerId = string;
 export type Faction = "village" | "werewolves" | "neutral";
 export type RoleName = string;
@@ -203,6 +205,11 @@ for (const [name, faction, winCondition] of CATALOGUE_ROLES) {
     activeAbility: null,
     designStatus: "undefined"
   };
+}
+
+// Narrative copy may be shown now; proposed powers stay outside game rules.
+for (const [role, proposal] of Object.entries(ROLE_PROPOSALS)) {
+  if (ROLE_DATABASE[role]) ROLE_DATABASE[role].description = proposal.description;
 }
 
 export class GameError extends Error {}

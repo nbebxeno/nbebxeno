@@ -149,3 +149,9 @@ The engine currently accepts the configured tie rule `no-elimination` and a deat
 - Chaos samples the entire non-Werewolf catalogue uniformly without replacement, refilling only after exhaustion. This spreads selections beyond the previous eight-role subset and varies even four-player games. Werewolf variants remain outside the selection pool because their abilities and attack coordination are unfinished.
 - Part 2 is still needed to finalize each mode’s eligible pool, rare-role weights, and player-count balance. The existing one-Werewolf composition is provisional, especially for larger groups. Classic and Beginner composition changes and undefined individual objectives require those missing rules.
 - The simulated WhatsApp test checks group locking, private voting prompts, DM votes/retractions, duplicate join replies, and early resolution. It does not establish live WhatsApp connectivity.
+
+## WhatsApp message design and role proposals
+
+The bot uses shared WhatsApp message templates in `src/presentation.ts` for role cards, lobbies, rosters, role summaries, and status. Cards use readable role/faction names and explain where to send commands. Lobbies show the selected mode and the next step instead of always asking the host to pick a mode.
+
+See [message previews](docs/WHATSAPP_PREVIEW.md) and [the 55 role proposals](docs/ROLE_PROPOSALS.md). Every unfinished role now has distinct narrative copy. Proposed abilities and objectives are stored separately in `src/role-proposals.ts` for review; they do not enable special powers or change win logic. Unfinished cards say that their special power is not active yet. Existing Werewolf, Seer, Doctor, and Fool/Tanner behavior remains as described above.
