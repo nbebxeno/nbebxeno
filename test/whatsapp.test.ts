@@ -10,12 +10,17 @@ import { GameEngine, ROLE_DATABASE } from "../src/engine.ts";
 test("WhatsApp keeps voting private while locked, suppresses repeat joins, and closes on the last DM vote", async (t) => {
   const handlers = new Map<string, (event: any) => Promise<void>>();
   const sent: Array<{ jid: string; text: string }> = [];
+  const images: Buffer[] = [];
+  let failImage = false;
   const settings: string[] = [];
   let metadata: any = { participants: [{ id: "1@s.whatsapp.net", admin: "admin" }] };
   const socket = {
     user: { id: "15550002222:3@s.whatsapp.net", lid: "555@lid" },
     ev: { on: (event: string, handler: (event: any) => Promise<void>) => handlers.set(event, handler) },
-    sendMessage: async (jid: string, message: { text: string }) => { sent.push({ jid, text: message.text }); },
+    sendMessage: async (jid: string, message: { text?: string; image?: Buffer }) => {
+      if (message.image) { if (failImage) throw new Error("Image unavailable"); images.push(message.image); }
+      if (message.text) sent.push({ jid, text: message.text });
+    },
     groupSettingUpdate: async (_jid: string, setting: string) => { settings.push(setting); },
     groupMetadata: async () => metadata
   };
@@ -123,6 +128,17 @@ test("WhatsApp keeps voting private while locked, suppresses repeat joins, and c
     await send(ids[0], "!xeno status");
     assert.match(sent.at(-1)!.text, /Eliminated · 1/);
     assert.ok(sent.at(-1)!.text.includes(`${wolf} — Werewolf`));
+    await send(ids[0], "!replay");
+    assert.match(sent.at(-1)!.text, /THE VILLAGE CHRONICLE/);
+    await send(ids[0], "!lb");
+    assert.equal(images.length, 1);
+    assert.equal(images[0].subarray(1, 4).toString(), "PNG");
+    failImage = true;
+    t.mock.timers.tick(1000);
+    await send(ids[0], "!lb");
+    assert.match(sent.at(-1)!.text, /HALL OF FAME/);
+    assert.doesNotMatch(sent.at(-1)!.text, /@s.whatsapp.net/);
+    failImage = false;
     // An active saved game with multiple wolves and a Neutral killer exercises
     // the real private-action parser, LID/PN aliasing, and death-action timer.
     const dm = async (id: string, text: string, alt?: string) => {
@@ -145,6 +161,11 @@ test("WhatsApp keeps voting private while locked, suppresses repeat joins, and c
     assert.ok(saved.phaseDeadline > Date.now());
     await handlers.get("connection.update")!({ connection: "open" });
     for (let i = 0; i < 15; i++) await setImmediate();
+    await dm(advancedIds[4], "!lastwords Tell My Cat I Tried");
+    assert.ok(sent.some((message) => message.jid === "advanced@g.us" && message.text.includes("> Tell My Cat I Tried")));
+    t.mock.timers.tick(1000);
+    await dm(advancedIds[4], "!lastwords Another speech");
+    assert.equal(sent.filter((message) => message.text.includes("> Tell My Cat I Tried")).length, 1);
     await dm(advancedIds[4], "!act shoot 1");
     assert.equal(settings.at(-1), "not_announcement");
     saved = JSON.parse(readFileSync(".data/lordxeno-games.json", "utf8")).find((game: any) => game.groupId === "advanced@g.us");

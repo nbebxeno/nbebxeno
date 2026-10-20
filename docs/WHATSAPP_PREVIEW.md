@@ -113,3 +113,18 @@ Convert a Village player instead of this night's pack attack (once).
 1. Ada — Alpha Werewolf
 2. Bayo — Werewolf
 ```
+
+## Story cards
+
+```text
+✦ *LORDXENO / MORNING*
+────────────────
+Day 2 · Briar Hollow
+
+Morning comes. Everyone reaches the town square alive.
+The baker claims his garlic buns deserve the credit.
+```
+
+Scenes vary by game and actual events. Death cards retain role reveals. Players can DM `!lastwords Tell My Cat I Tried` within 15 seconds; the group receives their original message once. Finished games offer `!replay` and a short aftermath.
+
+`!lb` now renders a midnight-and-gold PNG table with player names, wins, win rate, and games; text remains available automatically if rendering or delivery fails.

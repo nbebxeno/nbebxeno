@@ -1,4 +1,4 @@
-import { GameEngine, GameError, type GameMode, type GameRules, type NightResolution, type Player, type PrivatePlayerView, type RoleDefinition, ROLE_DATABASE, type VoteSnapshot, type RoleAction } from "./engine.ts";
+import { GameEngine, GameError, type GameMode, type GameRules, type NightResolution, type Player, type PrivatePlayerView, type RoleDefinition, ROLE_DATABASE, type VoteSnapshot, type RoleAction, type ReplayData } from "./engine.ts";
 import { actionCard } from "./presentation.ts";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 export interface LobbySnapshot { groupId: string; hostId: string; players: Player[]; started: boolean; }
 export interface StartedGame { engine: GameEngine; players: Player[]; privateViews: PrivatePlayerView[]; }
 export interface VoteResult { eliminatedPlayerId: string | null; phase: string; winner: string | null; }
-export interface CompletedPlayer { id: string; role: string; faction: string; alive: boolean; lynched: boolean; }
+export interface CompletedPlayer { displayName: string; id: string; role: string; faction: string; alive: boolean; lynched: boolean; }
 export interface ResumableGame { groupId: string; phase: string; deadline?: number; nextPhase?: "night" | "voting"; }
 
 interface GroupSession {
@@ -20,6 +20,8 @@ interface GroupSession {
   phaseDeadline?: number;
   phaseNext?: "night" | "voting";
   mode?: GameMode;
+  archivedReplay?: ReplayData;
+  archivedLastWords?: { state: ReturnType<GameEngine["stateSnapshot"]>; aliases: Array<[string, string]> };
 }
 
 interface PersistedGroupSession {
@@ -33,6 +35,8 @@ interface PersistedGroupSession {
   phaseDeadline?: number;
   phaseNext?: "night" | "voting";
   mode?: GameMode;
+  archivedReplay?: ReplayData;
+  archivedLastWords?: { state: ReturnType<GameEngine["stateSnapshot"]>; aliases: Array<[string, string]> };
 }
 
 export class GameSessions {
@@ -48,9 +52,11 @@ export class GameSessions {
 
   createLobby(groupId: string, host: Player): LobbySnapshot {
     const existing = this.sessions.get(groupId);
+    const archivedReplay = existing?.engine?.publicView().status === "ended" ? existing.engine.replay() : existing?.archivedReplay;
+    const archivedLastWords = existing?.engine?.publicView().status === "ended" ? { state: existing.engine.stateSnapshot(), aliases: [...existing.aliases.entries()] } : existing?.archivedLastWords;
     if (existing?.engine?.publicView().status === "ended") this.sessions.delete(groupId);
     if (this.sessions.get(groupId)?.engine) throw new GameError("The current game has already started.");
-    const session = this.sessions.get(groupId) ?? { groupId, hostId: host.id, players: new Map(), aliases: new Map() };
+    const session = this.sessions.get(groupId) ?? { groupId, hostId: host.id, players: new Map(), aliases: new Map(), archivedReplay, archivedLastWords };
     session.players.set(host.id, host);
     this.sessions.set(groupId, session);
     this.persist();
@@ -104,6 +110,42 @@ export class GameSessions {
     if (matches.length > 1) throw new GameError("You are in multiple active games. Finish or end the other game before sending private actions.");
     if (matches.length === 1) return matches[0][0];
     throw new GameError("Unknown player. Send !join in the game group first.");
+  }
+
+  replay(groupId: string): ReplayData {
+    const session = this.requireLobby(groupId);
+    if (session.engine?.publicView().status === "ended") return session.engine.replay();
+    if (session.archivedReplay) return structuredClone(session.archivedReplay);
+    throw new GameError("No finished replay yet. Current actions stay private until the game ends.");
+  }
+  private lastWordsSource(session: GroupSession, identity: string) {
+    const id = this.lobbyPlayerId(session, identity);
+    if (id && session.engine?.canSpeakLastWords(id)) return { id, engine: session.engine, archived: false };
+    if (session.archivedLastWords) {
+      const saved = session.archivedLastWords;
+      const oldSession = { ...session, players: new Map(Object.values(saved.state.players).map((player) => [player.id, player])), aliases: new Map(saved.aliases) };
+      const oldId = this.lobbyPlayerId(oldSession, identity);
+      const engine = GameEngine.restore(saved.state, this.rules);
+      if (oldId && engine.canSpeakLastWords(oldId)) return { id: oldId, engine, archived: true };
+    }
+    return null;
+  }
+  lastWordsGroup(identity: string): string {
+    const matches = [...this.sessions.values()].filter((session) => this.lastWordsSource(session, identity));
+    if (matches.length !== 1) throw new GameError("You have no unique open last-words window. DM within 15 seconds of death, once only.");
+    return matches[0].groupId;
+  }
+  lastWords(groupId: string, identity: string, text: string) {
+    const session = this.requireLobby(groupId);
+    const source = this.lastWordsSource(session, identity);
+    if (!source) throw new GameError("Your last-words window is closed.");
+    source.engine.submitLastWords(source.id, text);
+    const events = source.engine.drainEvents();
+    if (source.archived) {
+      session.archivedLastWords!.state = source.engine.stateSnapshot();
+      session.archivedReplay = source.engine.replay();
+    }
+    this.persist(); return events;
   }
 
   snapshot(groupId: string): LobbySnapshot {
@@ -264,7 +306,7 @@ export class GameSessions {
       individualWinners: view.individualWinners,
       players: view.players.map((player) => {
         const privateView = session.engine!.privateView(player.id);
-        return { id: player.id, role: privateView.role, faction: privateView.faction, alive: player.alive, lynched: view.deaths.some((death) => death.playerId === player.id && death.cause === "vote") };
+        return { displayName: player.displayName, id: player.id, role: privateView.role, faction: privateView.faction, alive: player.alive, lynched: view.deaths.some((death) => death.playerId === player.id && death.cause === "vote") };
       })
     };
   }
@@ -333,7 +375,9 @@ export class GameSessions {
           enabledRoles: entry.enabledRoles,
           phaseDeadline: entry.phaseDeadline,
           phaseNext: entry.phaseNext,
-          mode: entry.mode
+          mode: entry.mode,
+          archivedReplay: entry.archivedReplay,
+          archivedLastWords: entry.archivedLastWords
         });
       }
       this.persist();
@@ -355,7 +399,9 @@ export class GameSessions {
       enabledRoles: session.enabledRoles,
       phaseDeadline: session.phaseDeadline,
       phaseNext: session.phaseNext,
-      mode: session.mode
+      mode: session.mode,
+      archivedReplay: session.archivedReplay,
+      archivedLastWords: session.archivedLastWords
     }));
     writeFileSync(this.filePath, JSON.stringify(stored, null, 2));
   }

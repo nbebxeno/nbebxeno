@@ -12,6 +12,8 @@ const exact = (...commands: string[]) => (command: string) => commands.includes(
 const prefix = (value: string) => (command: string) => command.startsWith(value);
 
 export const COMMAND_REGISTRY: readonly CommandDefinition[] = [
+  { name: "replay", group: "meta", usage: "!replay [page]", description: "Read the finished game's sealed timeline.", matches: (command) => command === "!xeno replay" || command.startsWith("!xeno replay ") },
+  { name: "lastwords", group: "game", usage: "!lastwords <message> (DM)", description: "Your one final message, within 15 seconds of death.", matches: (command) => command === "!xeno lastwords" || command.startsWith("!xeno lastwords ") },
   { name: "details", group: "game", usage: "!details (DM)", description: "Read your complete role rules privately.", matches: exact("!xeno details") },
   { name: "games", group: "admin", usage: "!games (GM, DM)", description: "List games and codes for private GM control.", matches: exact("!xeno games") },
   { name: "gm", group: "admin", usage: "!gm", description: "Check your permanent Game Master or admin access.", matches: exact("!xeno gm") },
@@ -38,7 +40,7 @@ export const COMMAND_REGISTRY: readonly CommandDefinition[] = [
   { name: "resolve", group: "voting", usage: "!resolve", description: "Resolve the completed vote.", matches: exact("!xeno resolve") },
   { name: "stats", group: "meta", usage: "!stats", description: "Show persistent player stats.", matches: exact("!xeno stats") },
   { name: "chronicle", group: "meta", usage: "!chronicle", description: "Show the Xenoverse history.", matches: exact("!xeno chronicle") },
-  { name: "leaderboard", group: "meta", usage: "!leaderboard", description: "Show top players.", matches: exact("!xeno leaderboard") },
+  { name: "leaderboard", group: "meta", usage: "!leaderboard", description: "Show top players.", matches: exact("!xeno leaderboard", "!xeno lb") },
   { name: "kick", group: "admin", usage: "!kick <number>", description: "Remove a lobby player as a group admin or permanent GM.", matches: prefix("!xeno kick ") },
   { name: "endgame", group: "admin", usage: "!endgame [game-code]", description: "End a game or lobby as a group admin or permanent GM.", matches: (command) => command === "!xeno endgame" || command.startsWith("!xeno endgame ") },
   { name: "settings", group: "admin", usage: "!settings", description: "Show enabled role settings.", matches: exact("!xeno settings") }

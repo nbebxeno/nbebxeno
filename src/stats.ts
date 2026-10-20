@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 export interface PlayerStats {
   id: string;
+  displayName?: string;
   games: number;
   wins: number;
   lynched: number;
@@ -29,13 +30,20 @@ export class StatsStore {
   }
 
   leaderboard(limit = 10): PlayerStats[] {
-    return Object.values(this.data.players).sort((left, right) => right.wins - left.wins || right.survived - left.survived).slice(0, limit);
+    return Object.values(this.data.players).filter((player) => player.games > 0).sort((left, right) => right.wins - left.wins || right.survived - left.survived).slice(0, limit);
   }
 
   chronicle(limit = 10): string[] { return this.data.chronicle.slice(-limit).reverse(); }
 
-  record(playerId: string, role: string, won: boolean, lynched: boolean, survived: boolean): void {
+  rememberName(playerId: string, displayName: string): void {
     const current = this.get(playerId);
+    current.displayName = displayName.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 80);
+    this.data.players[playerId] = current; this.persist();
+  }
+
+  record(playerId: string, role: string, won: boolean, lynched: boolean, survived: boolean, displayName?: string): void {
+    const current = this.get(playerId);
+    if (displayName) current.displayName = displayName.slice(0, 80);
     current.games += 1;
     current.wins += won ? 1 : 0;
     current.lynched += lynched ? 1 : 0;
@@ -55,3 +63,4 @@ export class StatsStore {
     writeFileSync(this.filePath, JSON.stringify(this.data, null, 2));
   }
 }
+

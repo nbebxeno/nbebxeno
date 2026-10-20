@@ -157,3 +157,13 @@ WhatsApp cards use short headings, numbered targets, and a compact command foote
 Shared message rendering lives in `src/presentation.ts`, executable ability definitions in `src/abilities.ts`, role descriptions in `src/role-rules.ts`, and game behavior in `src/engine.ts`. The role catalogue is built once rather than filling placeholders and overwriting them. Compiler checks reject unused locals and parameters. Old night-action save migration is intentionally retained.
 
 See [message previews](docs/WHATSAPP_PREVIEW.md) and [ideas for future updates](docs/ROADMAP.md).
+
+## Village stories, last words, and replays
+
+Phase cards now tell short stories from Briar Hollow, with restrained borders and headings. Morning scenes distinguish pack attacks, independent attacks, poison, fire, and quiet nights without inventing investigation clues.
+
+- `!lastwords <message>` — DM one final message within 15 seconds of death (240 characters). Original capitalization is preserved. This does not spend a Hunter/Ghost action or extend its timer. The window survives restart and a new lobby opening.
+- `!replay [page]` — read the latest finished game's timeline, including actions, saves, votes, conversions, and deaths. Current-game secrets stay sealed until the game ends. A short aftermath appears after a natural victory. Older saves can have partial history; history is capped at 2,000 entries.
+- `!lb` or `!leaderboard` — a PNG Hall of Fame showing the top ten names, wins, win rate, and games. Names are remembered from joins and completed games; older unidentified entries appear as Villager numbers. Rendering or image-send failures fall back to text.
+
+The image renderer uses WebAssembly rather than a native image module. Android's Roboto/Noto Sans or an installed Linux font is used; optionally set `LORDXENO_FONT_PATH` to a readable font file. Run `npm ci` when updating to install the renderer dependency.

@@ -2,6 +2,11 @@ import type { AbilityDefinition } from "./abilities.ts";
 import type { NumberedAlivePlayer, Phase, Faction, GameMode, PrivatePlayerView, PublicGameView, RoleDefinition } from "./engine.ts";
 import type { LobbySnapshot } from "./session.ts";
 
+export const RULE_LINE = "────────────────";
+export function phaseBanner(title: string, meta: string, story: string): string {
+  return [`✦ *LORDXENO / ${title}*`, RULE_LINE, meta, "", story].join("\n");
+}
+
 export function roleLabel(role: string): string {
   const special: Record<string, string> = {
     "poisoner-werewolf": "Poisoner (Werewolf)", "poisoner-neutral": "Poisoner (Neutral)",
@@ -25,7 +30,7 @@ export function abilityCommand(ability: AbilityDefinition): string {
 export function roleCard(view: PrivatePlayerView, detailed = false): string {
   const abilities = view.abilities ?? [];
   return [
-    `🌑 *${roleLabel(view.role)}* · PRIVATE`, `Team: ${factionLabel(view.faction)}`, "",
+    `🌑 *${roleLabel(view.role)}* · PRIVATE`, `Team: ${factionLabel(view.faction)}`, RULE_LINE, "",
     view.roleDefinition.description, "", "*Objective*", view.roleDefinition.winCondition, "",
     ...(view.faction === "werewolves" ? ["*Known pack*", ...(view.knownTeam?.length ? view.knownTeam.map((ally) => `• ${ally.displayName} — ${roleLabel(ally.role)}`) : ["No other teammates known."]), ""] : []),
     ...(view.personalNotes?.length ? [...view.personalNotes, ""] : []),
@@ -55,7 +60,7 @@ export function lobbyCard(snapshot: LobbySnapshot, mode?: GameMode): string {
   const host = snapshot.players.find((player) => player.id === snapshot.hostId)?.displayName ?? "Host";
   const needed = Math.max(0, 4 - snapshot.players.length);
   return [
-    "🌒 *LORDXENO · LOBBY*", "",
+    "✦ *LORDXENO / THE GATHERING*", RULE_LINE, "",
     `Mode: ${mode ? roleLabel(mode) : "Not chosen"} · Players: ${snapshot.players.length}/4 min`, `Host: ${host}`, "",
     ...snapshot.players.map((player, index) => `${index + 1}. ${player.displayName}${player.id === snapshot.hostId ? " · host" : ""}`), "",
     ...(mode ? [needed ? `Waiting for ${needed} more ${needed === 1 ? "player" : "players"}.` : "Ready. The host can start the game.", "", "!join · Join   !leave · Leave   !start · Host starts"]
@@ -75,7 +80,7 @@ function rosterLines(view: PublicGameView): string[] {
 }
 
 export function rosterCard(view: PublicGameView): string {
-  return ["🌒 *LORDXENO · PLAYERS*", "", ...rosterLines(view)].join("\n");
+  return ["✦ *LORDXENO / VILLAGERS*", RULE_LINE, "", ...rosterLines(view)].join("\n");
 }
 
 export function deceasedLabel(view: PublicGameView, playerId: string): string {
@@ -85,14 +90,14 @@ export function deceasedLabel(view: PublicGameView, playerId: string): string {
 }
 
 export function statusCard(view: PublicGameView, seconds: number | null): string {
-  return ["📜 *LORDXENO · STATUS*", "", `Day ${view.dayNumber} · ${roleLabel(view.phase)}`,
+  return ["✦ *LORDXENO / VILLAGE WATCH*", RULE_LINE, "", `Day ${view.dayNumber} · ${roleLabel(view.phase)}`,
     ...(seconds === null ? [] : [`Time left: ${seconds}s`]), "",
     view.phase === "voting" ? "DM your vote · !vote <number>" : view.phase === "night" ? "Night powers in DM · !actions" : view.phase === "discussion" ? "Discussion open · keep your role secret." : view.phase === "reaction" ? "Final action pending · check your DM." : "Game finished · !lobby to play again.",
     "", ...rosterLines(view)].join("\n");
 }
 
 export function rolesCard(roles: RoleDefinition[]): string {
-  return ["🎭 *LORDXENO · ROLES IN PLAY*", ...roles.map((role) => `*${roleLabel(role.name)}* · ${factionLabel(role.faction)}\n${role.description}`)].join("\n\n");
+  return ["✦ *LORDXENO / THE CAST*", RULE_LINE, ...roles.map((role) => `*${roleLabel(role.name)}* · ${factionLabel(role.faction)}\n${role.description}`)].join("\n\n");
 }
 
 export function victoryCard(summary: { winner: Faction | null; team: Array<{ id: string; displayName: string; role: string }>; personal: Array<{ id: string; displayName: string; role: string }> }): string {
@@ -100,7 +105,7 @@ export function victoryCard(summary: { winner: Faction | null; team: Array<{ id:
     : summary.winner === "village" ? "☀️ *VILLAGE WINS!*"
     : summary.team.length ? "🌘 *NEUTRAL VICTORY!*" : "🏁 *GAME OVER*";
   const list = (players: typeof summary.team) => players.map((player, i) => `${i + 1}. ${player.displayName} — ${roleLabel(player.role)}`);
-  return [heading, "",
+  return [heading, RULE_LINE, "",
     ...(summary.team.length ? ["*Winning team*", ...list(summary.team)] : []),
     ...(summary.personal.length ? ["", "*Personal winners*", ...list(summary.personal)] : []),
     ...(!summary.team.length && !summary.personal.length ? ["No winners this game."] : [])

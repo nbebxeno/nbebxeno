@@ -5,9 +5,12 @@ import * as qrcodeImage from "qrcode";
 import { GameError } from "./engine.ts";
 import { PermanentGms, canonicalIdentity, matchingParticipant, metadataIsAdmin } from "./access.ts";
 import { GameSessions } from "./session.ts";
+import { discussionStory, nightStory, votingStory, dawnStory, verdictStory } from "./narration.ts";
+import { replayCard, replayHighlights } from "./replay.ts";
+import { leaderboardPng, leaderboardName } from "./leaderboard-image.ts";
 import { StatsStore } from "./stats.ts";
 import { helpText, resolveCommand, normalizeCommand } from "./commands.ts";
-import { roleCard, lobbyCard, rosterCard, statusCard, rolesCard, roleLabel, deceasedLabel, victoryCard, votingCard } from "./presentation.ts";
+import { roleCard, lobbyCard, rosterCard, statusCard, rolesCard, roleLabel, deceasedLabel, victoryCard, votingCard, phaseBanner } from "./presentation.ts";
 
 const authDirectory = "./.auth/lordxeno";
 const qrImagePath = `${authDirectory}/whatsapp-qr.png`;
@@ -68,7 +71,7 @@ function remainingSeconds(groupId: string): number | null {
 function recordCompletedGame(groupId: string): void {
   const result = sessions.completedRecord(groupId);
   if (!result) return;
-  for (const player of result.players) stats.record(player.id, player.role, (result.winner !== "neutral" && player.faction === result.winner) || result.individualWinners.includes(player.id), player.lynched, player.alive);
+  for (const player of result.players) stats.record(player.id, player.role, (result.winner !== "neutral" && player.faction === result.winner) || result.individualWinners.includes(player.id), player.lynched, player.alive, player.displayName);
   stats.addChronicle(`${new Date().toISOString().slice(0, 10)}: ${result.winner} victory in ${groupId}; ${result.players.length} players summoned.`);
 }
 
@@ -200,6 +203,16 @@ async function startWhatsApp(): Promise<void> {
       const senderIdentities = [groupIdentity, message.key.participant, message.key.participantAlt, (message.key as { participantPn?: string }).participantPn];
       const sender = { id: groupIdentity, displayName: message.pushName ?? groupIdentity };
       try {
+        if (commandName === "lastwords") {
+          if (remoteJid.endsWith("@g.us")) throw new GameError("Send your last words in DM: !lastwords <message>.");
+          let identity = remoteJid, groupId: string;
+          try { groupId = sessions.lastWordsGroup(identity); }
+          catch (error) { if (!message.key.remoteJidAlt) throw error; identity = message.key.remoteJidAlt; groupId = sessions.lastWordsGroup(identity); }
+          const words = text.replace(/^!(?:xeno\s+)?lastwords\s*/i, "");
+          for (const event of sessions.lastWords(groupId, identity, words)) await safeSend(socket, event.recipient ?? groupId, event.text);
+          await safeSend(socket, remoteJid, "Your last words have reached the square. Rest dramatically.");
+          continue;
+        }
         if (!remoteJid.endsWith("@g.us") && ["gm", "games", "endgame"].includes(commandName)) {
           const privateIdentities = [remoteJid, message.key.remoteJidAlt];
           const permanent = await managerAccess(socket, undefined, privateIdentities, message.key.fromMe ?? false) === "gm";
@@ -284,6 +297,7 @@ async function startWhatsApp(): Promise<void> {
         } else if (commandName === "lobby") {
           clearPhaseTimer(remoteJid);
           await safeSend(socket, message.key.remoteJid, lobbyMessage(sessions.createLobby(message.key.remoteJid, sender)));
+          stats.rememberName(sender.id, sender.displayName);
           if (participantAlias && participantAlias !== groupIdentity) sessions.registerAlias(remoteJid, groupIdentity, participantAlias);
         } else if (commandName === "mode") {
           const mode = command.slice("!xeno mode ".length).trim();
@@ -293,6 +307,7 @@ async function startWhatsApp(): Promise<void> {
         } else if (commandName === "join") {
           if (!sessions.mode(remoteJid)) throw new GameError("The host must choose a game mode before players join.");
           const lobby = sessions.joinLobby(remoteJid, sender);
+          stats.rememberName(sender.id, sender.displayName);
           duplicateJoinWarnings.delete(joinWarningKey);
           await safeSend(socket, remoteJid, lobbyMessage(lobby));
           if (participantAlias && participantAlias !== groupIdentity) sessions.registerAlias(remoteJid, groupIdentity, participantAlias);
@@ -307,7 +322,7 @@ async function startWhatsApp(): Promise<void> {
           const started = sessions.startGame(message.key.remoteJid, groupIdentity);
           await safeSend(socket, message.key.remoteJid, "🌘 *LORDXENO · THE SUMMONING*\n\nYour secret role is arriving by private message. Keep it to yourself.");
           for (const view of started.privateViews) await safeSend(socket, view.player.id, roleCard(view));
-          void enterPhase(socket, remoteJid, "discussion", "☀️ *DAY 1 · DISCUSSION*\n\nYou have 2 minutes. Discuss in the group; voting opens after the first night.", "night");
+          void enterPhase(socket, remoteJid, "discussion", phaseBanner("DAY 1 / THE SQUARE", "Discussion · 2 minutes", discussionStory(1, `${remoteJid}:${sessions.gameSnapshot(remoteJid).startedAt}`)), "night");
         } else if (commandName === "status") {
           const lobby = sessions.snapshot(remoteJid);
           if (!lobby.started) {
@@ -352,9 +367,17 @@ async function startWhatsApp(): Promise<void> {
           await safeSend(socket, remoteJid, `📊 STATS\n\nGames: ${current.games}\nWins: ${current.wins}\nWin rate: ${current.games ? Math.round(current.wins / current.games * 100) : 0}%\nLynched: ${current.lynched}\nSurvived to end: ${current.survived}\nMost played role: ${favorite === "none" ? "None yet" : roleLabel(favorite)}`);
         } else if (commandName === "chronicle") {
           await safeSend(socket, remoteJid, `📖 VILLAGE CHRONICLE\n\n${stats.chronicle().join("\n") || "No legends have been recorded yet."}`);
+        } else if (commandName === "replay") {
+          const page = command.slice("!xeno replay".length).trim();
+          await safeSend(socket, remoteJid, replayCard(sessions.replay(remoteJid), page ? Number(page) : 1));
         } else if (commandName === "leaderboard") {
-          const entries = stats.leaderboard().map((entry, index) => `${index + 1}. ${entry.id} - ${entry.wins} wins`).join("\n");
-          await safeSend(socket, remoteJid, `🏆 LEADERBOARD\n\n${entries || "No players have completed a recorded game yet."}`);
+          const top = stats.leaderboard();
+          try {
+            await socket.sendMessage(remoteJid, { image: await leaderboardPng(top), caption: "LORDXENO / HALL OF FAME\nThe village remembers its legends. · !stats" });
+          } catch {
+            const entries = top.map((entry, i) => `${i + 1}. ${leaderboardName(entry, i + 1)} · ${entry.wins} wins · ${entry.games} games`).join("\n");
+            await safeSend(socket, remoteJid, `*LORDXENO / HALL OF FAME*\n────────────────\n${entries || "No legends yet. Finish a game to claim your place."}`);
+          }
         } else if (commandName === "kick") {
           if (!await managerAccess(socket, remoteJid, senderIdentities, message.key.fromMe ?? false)) throw new GameError("Only a group admin or permanent Game Master can kick players.");
           const targetNumber = Number(command.slice("!xeno kick ".length).trim());
@@ -419,6 +442,7 @@ async function continueGame(socket: ReturnType<typeof makeWASocket>, groupId: st
     if (message) await safeSend(socket, groupId, message);
     await safeSend(socket, groupId, victoryCard(sessions.victorySummary(groupId)));
     recordCompletedGame(groupId);
+    await safeSend(socket, groupId, replayHighlights(sessions.replay(groupId)));
     return;
   }
   if (view.phase === "reaction") {
@@ -426,7 +450,7 @@ async function continueGame(socket: ReturnType<typeof makeWASocket>, groupId: st
     await enterReaction(socket, groupId);
   } else if (view.phase === "discussion") {
     const seconds = sessions.discussionMilliseconds(groupId) / 1000;
-    await enterPhase(socket, groupId, "discussion", `${message ? `${message}\n\n` : ""}☀️ *DAY ${view.dayNumber} · DISCUSSION*\n\nYou have ${seconds} seconds.`, "voting");
+    await enterPhase(socket, groupId, "discussion", `${message ? `${message}\n\n` : ""}${phaseBanner(`DAY ${view.dayNumber} / THE SQUARE`, `Discussion · ${seconds}s`, discussionStory(view.dayNumber, `${groupId}:${view.startedAt}`))}`, "voting");
   } else if (view.phase === "night") await enterPhase(socket, groupId, "night", "Night falls.");
 }
 
@@ -471,7 +495,7 @@ async function enterPhase(socket: ReturnType<typeof makeWASocket>, groupId: stri
       if (actual !== "night" && actual !== "voting") throw new GameError("This phase cannot begin now.");
       await setNightAccess(socket, groupId);
       await flushEvents(socket, groupId);
-      await safeSend(socket, groupId, actual === "night" ? "🌑 *NIGHT* · 60s\nPowers are in your DM · !actions" : "⚖️ *VOTE* · 60s\nCheck your DM to vote and use powers.");
+      await safeSend(socket, groupId, actual === "night" ? phaseBanner(`NIGHT ${current.nightNumber} / LIGHTS OUT`, "60s · Powers in DM · !actions", nightStory(current.nightNumber, `${groupId}:${current.startedAt}`)) : phaseBanner("THE VERDICT", "60s · Vote privately", votingStory(current.dayNumber, `${groupId}:${current.startedAt}`)));
       const actors = sessions.actionActors(groupId);
       for (const player of current.players.filter((player) => player.alive)) {
         if (actual === "voting") await safeSend(socket, player.id, votingCard(sessions.gameSnapshot(groupId)));
@@ -497,8 +521,9 @@ async function resolveNightPhase(socket: ReturnType<typeof makeWASocket>, groupI
     const result = sessions.resolveNight(groupId, force);
     clearPhaseTimer(groupId);
     const view = sessions.gameSnapshot(groupId);
-    const deaths = result.deaths.map((id) => deceasedLabel(view, id));
-    dawn = deaths.length ? `🌅 *DAWN*\n\n${deaths.join("\n")} did not survive the night.` : "🌅 *DAWN*\n\nNo one was lost this night.";
+    const deaths = result.deaths.map((id) => ({ ...view.deaths.find((death) => death.playerId === id)!, displayName: view.players.find((player) => player.id === id)?.displayName ?? id }));
+    dawn = phaseBanner("DAWN / THE RECKONING", `Day ${view.dayNumber}`, dawnStory(view.dayNumber, deaths, `${groupId}:${view.startedAt}`));
+    if (deaths.length) dawn += `\n\n${result.deaths.map((id) => deceasedLabel(view, id)).join("\n")}`;
   } catch (error) {
     await safeSend(socket, groupId, error instanceof GameError ? error.message : "Night could not be resolved.");
   } finally { phaseTransitions.delete(groupId); }
@@ -515,6 +540,7 @@ async function resolveVotePhase(socket: ReturnType<typeof makeWASocket>, groupId
     clearPhaseTimer(groupId);
     const view = sessions.gameSnapshot(groupId);
     await safeSend(socket, groupId, result.eliminatedPlayerId ? `⚖️ VOTE RESOLVED\n\n${deceasedLabel(view, result.eliminatedPlayerId)} has been eliminated.` : "⚖️ VOTE RESOLVED\n\nNo player was eliminated by the vote.");
+    await safeSend(socket, groupId, verdictStory(result.eliminatedPlayerId ? view.players.find((player) => player.id === result.eliminatedPlayerId)?.displayName ?? null : null));
     resolved = true;
   } catch (error) {
     await safeSend(socket, groupId, error instanceof GameError ? error.message : "Voting could not be resolved.");

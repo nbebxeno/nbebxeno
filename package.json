@@ -16,6 +16,7 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
+    "@resvg/resvg-wasm": "^2.6.2",
     "@whiskeysockets/baileys": "^7.0.0-rc14",
     "pino": "^10.3.1",
     "qrcode": "^1.5.4",

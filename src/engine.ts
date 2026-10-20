@@ -28,6 +28,7 @@ export interface GameRules {
 
 export interface GameState {
   status: "lobby" | "active" | "ended";
+  startedAt?: number;
   dayNumber: number;
   nightNumber: number;
   phase: Phase;
@@ -38,6 +39,9 @@ export interface GameState {
   votes: Record<PlayerId, PlayerId>;
   nightActions: Record<PlayerId, NightAction>;
   runtime?: RoleRuntime;
+  replayHistory?: ReplayEntry[];
+  replayPartial?: boolean;
+  lastWords?: Record<string, { deadline: number; spoken: boolean }>;
   deaths: DeathRecord[];
   winner: Faction | null;
   individualWinners: PlayerId[];
@@ -49,6 +53,7 @@ export interface DeathRecord {
   dayNumber: number;
   cause: "vote" | "night-attack" | "poison" | "shot" | "heartbreak" | "curse" | "fire" | "undefined";
   revived?: boolean;
+  attackKind?: "pack" | "independent";
 }
 
 export type NightAction =
@@ -78,6 +83,7 @@ export interface PrivatePlayerView {
 
 export interface PublicGameView {
   status: GameState["status"];
+  startedAt?: number;
   dayNumber: number;
   nightNumber: number;
   phase: Phase;
@@ -169,6 +175,9 @@ export const ROLE_DATABASE: Record<RoleName, RoleDefinition> = Object.fromEntrie
   return [name, { name, faction, description: rules.description, activeAbility: rules.ability, winCondition: rules.winCondition, designStatus: "defined" }];
 }));
 
+export interface ReplayEntry { day: number; night: number; phase: Phase; kind: "phase" | "action" | "vote" | "death" | "event" | "lastwords" | "result"; text: string; }
+export interface ReplayData { entries: ReplayEntry[]; partial: boolean; winner: Faction | null; roles: Array<{ displayName: string; role: string; faction: Faction }>; }
+
 export interface RoleAction { ability: string; targets: string[]; option?: string; }
 export interface GameEvent { recipient?: string; text: string; }
 export interface RoleMemory {
@@ -215,9 +224,9 @@ export class GameEngine {
     if (roles.length !== players.length || roles.some((role) => !ROLE_DATABASE[role])) throw new GameError("Invalid role composition.");
     this.rules = rules;
     this.state = {
-      status: "active", dayNumber: 1, nightNumber: 0, phase: "discussion",
+      status: "active", startedAt: Date.now(), dayNumber: 1, nightNumber: 0, phase: "discussion",
       players: Object.fromEntries(players.map((player) => [player.id, player])), alive: players.map((player) => player.id),
-      roles: {}, factions: {}, votes: {}, nightActions: {}, deaths: [], winner: null, individualWinners: []
+      roles: {}, factions: {}, votes: {}, nightActions: {}, deaths: [], winner: null, individualWinners: [], replayHistory: [], lastWords: {}
     };
     players.forEach((player, i) => { this.state.roles[player.id] = roles[i]; this.state.factions[player.id] = ROLE_DATABASE[roles[i]].faction; });
     this.runtime();
@@ -228,6 +237,7 @@ export class GameEngine {
     GameEngine.shuffle(roles, random);
     const game = new GameEngine(players, roles, rules);
     game.initializeRoles(random);
+    game.remember("phase", "The village gathers for its first discussion.");
     return game;
   }
 
@@ -236,6 +246,9 @@ export class GameEngine {
     game.rules = rules;
     game.state = structuredClone(state);
     game.state.individualWinners ??= [];
+    game.state.replayPartial ??= !game.state.replayHistory;
+    game.state.replayHistory ??= [];
+    game.state.lastWords ??= {};
     const legacy = !game.state.runtime;
     game.runtime();
     if (legacy) {
@@ -298,7 +311,33 @@ export class GameEngine {
   private isAttacker(id: string): boolean {
     return this.faction(id) === "werewolves" && (PACK_ATTACKERS.has(this.role(id)) || ROLE_DATABASE[this.role(id)].faction !== "werewolves");
   }
-  private event(text: string, recipient?: string): void { this.runtime().events.push({ text, ...(recipient ? { recipient } : {}) }); }
+  private remember(kind: ReplayEntry["kind"], text: string): void {
+    const entries = this.state.replayHistory ??= [];
+    entries.push({ day: this.state.dayNumber, night: this.state.nightNumber, phase: this.state.phase, kind, text: text.slice(0, 800) });
+    if (entries.length > 2000) { entries.splice(0, entries.length - 2000); this.state.replayPartial = true; }
+  }
+  private event(text: string, recipient?: string): void {
+    this.runtime().events.push({ text, ...(recipient ? { recipient } : {}) });
+    this.remember("event", recipient ? `[${this.name(recipient)}'s DM] ${text}` : text);
+  }
+  replay(): ReplayData {
+    if (this.state.status !== "ended") throw new GameError("The current game's replay stays sealed until the game ends.");
+    return { entries: structuredClone(this.state.replayHistory ?? []), partial: this.state.replayPartial ?? false, winner: this.state.winner,
+      roles: Object.keys(this.state.players).map((id) => ({ displayName: this.name(id), role: this.role(id), faction: this.faction(id) })) };
+  }
+  canSpeakLastWords(id: string): boolean {
+    const window = this.state.lastWords?.[id];
+    return !!window && !window.spoken && !this.living(id) && Date.now() <= window.deadline;
+  }
+  submitLastWords(id: string, text: string): void {
+    this.requirePlayer(id);
+    if (!this.canSpeakLastWords(id)) throw new GameError("Last words are available once, by DM, within 15 seconds of your death.");
+    const words = text.replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, " ").replace(/\s+/g, " ").trim();
+    if (!words || [...words].length > 240) throw new GameError("Keep your last words to 1–240 characters.");
+    this.state.lastWords![id].spoken = true;
+    this.remember("lastwords", `${this.name(id)}: “${words}”`);
+    this.runtime().events.push({ text: `*LAST WORDS · ${this.name(id)}*\n> ${words}` });
+  }
   drainEvents(): GameEvent[] { return this.runtime().events.splice(0); }
 
   private initializeRoles(random: () => number): void {
@@ -319,7 +358,7 @@ export class GameEngine {
 
   publicView(): PublicGameView {
     return {
-      status: this.state.status, dayNumber: this.state.dayNumber, nightNumber: this.state.nightNumber, phase: this.state.phase,
+      status: this.state.status, startedAt: this.state.startedAt, dayNumber: this.state.dayNumber, nightNumber: this.state.nightNumber, phase: this.state.phase,
       players: Object.values(this.state.players).map((player) => ({ ...player, alive: this.living(player.id) })),
       deaths: this.state.deaths.filter((death) => !death.revived).map(({ role, ...death }) => this.rules.revealRoleOnDeath ? { ...death, role: role ?? this.state.roles[death.playerId] } : death),
       winner: this.state.winner, individualWinners: [...this.state.individualWinners]
@@ -401,6 +440,7 @@ export class GameEngine {
     this.requirePlayer(id);
     if (!["night", "voting", "reaction"].includes(this.state.phase)) throw new GameError("There is no action to skip in this phase.");
     if (this.state.phase === "reaction") { this.resolveReaction(id, undefined); return; }
+    this.remember("action", `${this.name(id)} passed on remaining powers.`);
     this.requireAlive(id);
     if (!this.runtime().skipped.includes(id)) this.runtime().skipped.push(id);
   }
@@ -417,7 +457,7 @@ export class GameEngine {
       this.runtime().skipVoting = false;
       this.event("The Noble's death has cancelled today's vote. Night falls.");
       this.startNight();
-    } else this.state.phase = "voting";
+    } else { this.state.phase = "voting"; this.remember("phase", `Day ${this.state.dayNumber}: the village votes.`); }
   }
   beginNight(): void {
     this.requirePhase("discussion");
@@ -428,6 +468,7 @@ export class GameEngine {
   private startNight(): void {
     this.state.phase = "night";
     this.state.nightNumber++;
+    this.remember("phase", `Night ${this.state.nightNumber}: doors close across the village.`);
     this.resetSubmissions();
     this.runtime().retrial = false;
   }
@@ -436,8 +477,9 @@ export class GameEngine {
     if (!this.eligibleVoters().includes(id)) throw new GameError("Your vote is blocked for this phase.");
     if (this.state.votes[id]) throw new GameError("This player has already voted.");
     this.state.votes[id] = target;
+    this.remember("vote", `${this.name(id)} voted for ${this.name(target)}.`);
   }
-  unvote(id: string): void { this.requirePhase("voting"); this.requireAlive(id); delete this.state.votes[id]; }
+  unvote(id: string): void { this.requirePhase("voting"); this.requireAlive(id); delete this.state.votes[id]; this.remember("vote", `${this.name(id)} withdrew their vote.`); }
   voteSnapshot(): VoteSnapshot {
     const counts: Record<string, number> = {};
     for (const [voter, target] of Object.entries(this.state.votes)) if (this.eligibleVoters().includes(voter)) counts[target] = (counts[target] ?? 0) + 1;
@@ -474,6 +516,7 @@ export class GameEngine {
     if (role === "arsonist" && (current.douse || current.ignite)) throw new GameError("Douse or ignite, not both in the same night.");
     if (action.ability === "rehearse" && (memory.rehearsed ?? []).includes(memory.labels![Number(action.option) - 1])) throw new GameError("That label has already been rehearsed.");
     if (action.ability === "haunt" && memory.killerFaction && this.faction(target) !== memory.killerFaction) throw new GameError("Choose a target from your killer's faction.");
+    this.remember("action", `${this.name(id)} (${this.role(id)}) used ${action.ability}${action.targets.length ? ` on ${action.targets.map((target) => this.name(target)).join(" and ")}` : action.option ? `: ${action.option}` : ""}.`);
     if (this.state.phase === "reaction") { this.resolveReaction(id, action); return; }
     (this.runtime().actions[id] ??= {})[action.ability] = structuredClone(action);
     if (action.ability === "audit") { this.spend(id, "audit"); this.event(`Missing night submissions: ${this.requiredNightActors().filter((actor) => !this.actionComplete(actor)).length}.`, id); }
@@ -643,6 +686,7 @@ export class GameEngine {
       const target = action.targets[0];
       if (this.living(id) && !this.living(target)) {
         this.state.alive.push(target);
+        delete this.state.lastWords?.[target];
         this.state.alive.sort((a, b) => Object.keys(this.state.players).indexOf(a) - Object.keys(this.state.players).indexOf(b));
         for (const death of this.state.deaths.filter((death) => death.playerId === target)) death.revived = true;
         this.spend(id, "revive"); this.event(`${this.name(target)} has returned to life.`);
@@ -693,7 +737,10 @@ export class GameEngine {
   private kill(id: string, cause: DeathRecord["cause"], killer?: string): void {
     if (!this.living(id)) return;
     this.state.alive = this.state.alive.filter((other) => other !== id);
-    this.state.deaths.push({ playerId: id, role: this.role(id), dayNumber: this.state.dayNumber, cause });
+    this.remember("death", `${this.name(id)} (${this.role(id)}) died: ${cause}${killer ? `; caused by ${cause === "night-attack" && this.isAttacker(killer) ? "the Werewolf pack" : this.name(killer)}` : ""}.`);
+    (this.state.lastWords ??= {})[id] = { deadline: Date.now() + 15_000, spoken: false };
+    this.runtime().events.push({ recipient: id, text: "Your candle has gone out. One last thing to tell the village? DM !lastwords <message> within 15 seconds (240 characters). This does not replace a Hunter or Ghost action." });
+    this.state.deaths.push({ playerId: id, role: this.role(id), dayNumber: this.state.dayNumber, cause, ...(cause === "night-attack" && killer ? { attackKind: this.isAttacker(killer) ? "pack" as const : "independent" as const } : {}) });
     const role = this.role(id), memory = this.memory(id), rt = this.runtime();
     if (["shot", "heartbreak", "curse"].includes(cause)) this.event(`${this.name(id)} died${this.rules.revealRoleOnDeath ? ` — ${role.replace(/-/g, " ")}` : ""} (${cause}).`);
     if (killer) memory.killerFaction = this.faction(killer);
@@ -766,8 +813,9 @@ export class GameEngine {
       if (role === "doppelganger" && this.living(id) && !m.copied && m.targets.copy?.some((target) => this.living(target))) this.personalWin(id);
     }
     this.state.status = "ended"; this.state.phase = "ended";
+    this.remember("result", `Game ended: ${this.state.winner}. Personal winners: ${this.state.individualWinners.map((id) => this.name(id)).join(", ") || "none"}.`);
   }
-  forceEnd(): void { this.state.status = "ended"; this.state.phase = "ended"; this.runtime().reactions = []; }
+  forceEnd(): void { this.remember("result", "The Game Master ended the game early."); this.state.status = "ended"; this.state.phase = "ended"; this.runtime().reactions = []; }
   private requirePlayer(id: string): void { if (!this.state.players[id]) throw new GameError("Unknown player."); }
   private requireAlive(id: string): void { this.requirePlayer(id); if (!this.living(id)) throw new GameError("Dead players cannot perform this action."); }
   private requirePhase(phase: Phase): void { if (this.state.phase !== phase) throw new GameError(`This action is unavailable during ${this.state.phase}.`); }
