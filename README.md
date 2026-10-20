@@ -91,7 +91,10 @@ Revival restores original role/faction and does not restore spent powers. Witch 
 !help          All command groups
 !ping          Connection check
 !leave         Leave the lobby
-!myrole        Private role/team reminder (group or DM)
+!myrole        Compact private role/team reminder (group or DM)
+!details       Complete private role rules
+!help voting   Help for one command group
+!help all      All commands with descriptions
 !roles         Descriptions of roles in this game, without player assignments
 !votes         Current tally
 !resolve       Resolve a fully submitted vote
@@ -146,3 +149,11 @@ npm run start:whatsapp
 ```
 
 Pairing and game saves remain in place. Start a fresh game to receive the new mode composition; an existing game's assigned roles are preserved.
+
+## Message layout and maintenance
+
+WhatsApp cards use short headings, numbered targets, and a compact command footer. `!myrole` shows a compact role card; `!details` expands the complete rules. `!help` is a command overview; `!help setup`, `!help game`, `!help voting`, `!help meta`, and `!help admin` show explanations for one group.
+
+Shared message rendering lives in `src/presentation.ts`, executable ability definitions in `src/abilities.ts`, role descriptions in `src/role-rules.ts`, and game behavior in `src/engine.ts`. The role catalogue is built once rather than filling placeholders and overwriting them. Compiler checks reject unused locals and parameters. Old night-action save migration is intentionally retained.
+
+See [message previews](docs/WHATSAPP_PREVIEW.md) and [ideas for future updates](docs/ROADMAP.md).

@@ -1,19 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { GameEngine, ROLE_DATABASE } from "../src/engine.ts";
-import { ROLE_PROPOSALS } from "../src/role-proposals.ts";
+import { ROLE_RULES } from "../src/role-rules.ts";
 import { lobbyCard, roleCard, roleLabel, rosterCard } from "../src/presentation.ts";
 
 const rules = { tieRule: "no-elimination" as const, revealRoleOnDeath: false };
 const players = ["Ada", "Bayo", "Chidi", "Dami"].map((displayName) => ({ id: displayName.toLowerCase(), displayName }));
 
 test("every catalogue role has implemented status and descriptive copy", () => {
-  assert.equal(Object.keys(ROLE_PROPOSALS).length, 55);
+  assert.equal(Object.keys(ROLE_RULES).length, 55);
   for (const [id, role] of Object.entries(ROLE_DATABASE)) {
     assert.ok(role.description.length > 30, id);
     assert.doesNotMatch(role.description, /UNDEFINED|REQUIRES DESIGN|Catalogued role/, id);
     assert.equal(role.designStatus, "defined", id);
-    if (ROLE_PROPOSALS[id]) assert.ok(role.activeAbility, id);
+    if (ROLE_RULES[id]) assert.ok(role.activeAbility, id);
   }
   assert.notEqual(roleLabel("poisoner-werewolf"), roleLabel("poisoner-neutral"));
   assert.notEqual(roleLabel("priest-village"), roleLabel("priest-neutral"));
@@ -52,4 +52,19 @@ test("lobby instructions track mode and readiness while public rosters keep role
   assert.match(roster, /1\. Ada\n2\. Chidi\n3\. Dami/);
   assert.match(roster, /Eliminated · 1/);
   assert.doesNotMatch(roster, /Werewolf|Seer|Doctor|Villager/);
+});
+
+test("compact cards keep full rules accessible without repeating the full ability prose", () => {
+  const game = GameEngine.create(players, rules);
+  const state = game.stateSnapshot();
+  state.roles.ada = "alpha-werewolf";
+  state.factions.ada = "werewolves";
+  const view = GameEngine.restore(state, rules).privateView("ada");
+  const compact = roleCard(view);
+  const full = roleCard(view, true);
+  assert.ok(full.length > compact.length);
+  assert.match(compact, /!details/);
+  assert.match(compact, /!act convert/);
+  assert.ok(full.includes(view.roleDefinition.activeAbility!));
+  assert.equal(compact.includes(view.roleDefinition.activeAbility!), false);
 });

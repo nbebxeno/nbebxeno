@@ -1,5 +1,5 @@
 import { ROLE_ABILITIES, PACK_ATTACKERS, INDEPENDENT_KILLERS, PACK_ATTACK, EXTRA_ATTACK, HUNTER_SHOT, GHOST_MARK, type AbilityDefinition } from "./abilities.ts";
-import { ROLE_PROPOSALS } from "./role-proposals.ts";
+import { ROLE_RULES } from "./role-rules.ts";
 
 export type PlayerId = string;
 export type Faction = "village" | "werewolves" | "neutral";
@@ -97,127 +97,77 @@ export interface VoteSnapshot {
   counts: Record<PlayerId, number>;
 }
 
-export const ROLE_DATABASE: Record<RoleName, RoleDefinition> = {
-  werewolf: {
-    name: "werewolf",
-    faction: "werewolves",
-    winCondition: "Reach parity with the living non-Werewolves.",
-    description: "Knows fellow Werewolves and participates in their nightly attack.",
-    activeAbility: "Choose a target for the Werewolf faction.",
-    designStatus: "defined"
-  },
-  "alpha-werewolf": {
-    name: "alpha-werewolf",
-    faction: "werewolves",
-    winCondition: "Reach parity with the living non-Werewolves.",
-    description: "A rare Werewolf with an additional ability.",
-    activeAbility: null,
-    designStatus: "undefined"
-  },
-  villager: {
-    name: "villager",
-    faction: "village",
-    winCondition: "Help eliminate the Werewolf faction.",
-    description: "A Village member who relies on discussion, deduction, and voting.",
-    activeAbility: null,
-    designStatus: "undefined"
-  },
-  seer: {
-    name: "seer",
-    faction: "village",
-    winCondition: "Help eliminate the Werewolf faction.",
-    description: "Investigates one player each night and receives an alignment result.",
-    activeAbility: "Investigate one living player.",
-    designStatus: "defined"
-  },
-  doctor: {
-    name: "doctor",
-    faction: "village",
-    winCondition: "Help eliminate the Werewolf faction.",
-    description: "Protects one player each night, including themselves.",
-    activeAbility: "Protect one living player from applicable attacks.",
-    designStatus: "defined"
-  },
-  hunter: {
-    name: "hunter",
-    faction: "village",
-    winCondition: "Help eliminate the Werewolf faction.",
-    description: "Has a death-triggered final weapon opportunity.",
-    activeAbility: null,
-    designStatus: "undefined"
-  }
+const ROLE_FACTIONS: ReadonlyArray<readonly [RoleName, Faction]> = [
+  ["werewolf", "werewolves"],
+  ["alpha-werewolf", "werewolves"],
+  ["villager", "village"],
+  ["seer", "village"],
+  ["doctor", "village"],
+  ["hunter", "village"],
+  ["witch", "village"],
+  ["apprentice-seer", "village"],
+  ["fool", "neutral"],
+  ["mason", "village"],
+  ["old-man", "village"],
+  ["diseased", "village"],
+  ["lawyer", "village"],
+  ["scapegoat", "village"],
+  ["hapless-victim", "village"],
+  ["hangman", "village"],
+  ["martyr", "village"],
+  ["priest-village", "village"],
+  ["necromancer", "village"],
+  ["old-crone", "village"],
+  ["hierophant", "village"],
+  ["spellcaster", "village"],
+  ["insomniac", "village"],
+  ["lycan", "village"],
+  ["mortician", "village"],
+  ["scryer", "village"],
+  ["noble", "village"],
+  ["aura-seer", "village"],
+  ["big-bad-wolf", "werewolves"],
+  ["mystic-wolf", "werewolves"],
+  ["omega-wolf", "werewolves"],
+  ["sorcerer", "werewolves"],
+  ["poisoner-werewolf", "werewolves"],
+  ["minion", "werewolves"],
+  ["fruit-brute", "werewolves"],
+  ["fallen-angel", "werewolves"],
+  ["lone-wolf", "werewolves"],
+  ["wolf-cub", "werewolves"],
+  ["confused-wolf", "werewolves"],
+  ["german-shepherd", "werewolves"],
+  ["remorseful-werewolf", "werewolves"],
+  ["moderator", "neutral"],
+  ["murderer", "neutral"],
+  ["poisoner-neutral", "neutral"],
+  ["turncoat", "neutral"],
+  ["bloody-mary", "neutral"],
+  ["vengeful-ghost", "neutral"],
+  ["tanner", "neutral"],
+  ["doppelganger", "neutral"],
+  ["chef", "neutral"],
+  ["enchantress", "neutral"],
+  ["arsonist", "neutral"],
+  ["thespian", "neutral"],
+  ["cupid", "neutral"],
+  ["orphan", "neutral"],
+  ["guardian-angel", "neutral"],
+  ["priest-neutral", "neutral"],
+  ["hoodlum", "neutral"],
+];
+const CORE_ROLES: Record<string, { description: string; ability: string; winCondition: string }> = {
+  werewolf: { description: "Knows fellow Werewolves and participates in their nightly attack.", ability: "Choose a target for the Werewolf faction.", winCondition: "Reach parity with the living non-Werewolves." },
+  seer: { description: "Investigates one player each night and receives an alignment result.", ability: "Investigate one living player.", winCondition: "Help eliminate the Werewolf faction." },
+  doctor: { description: "Protects one player each night, including themselves.", ability: "Protect one living player from applicable attacks.", winCondition: "Help eliminate the Werewolf faction." }
 };
 
-const CATALOGUE_ROLES: Array<[string, Faction, string]> = [
-  ["witch", "village", "Help the Village; one kill potion and one revive potion per game."],
-  ["apprentice-seer", "village", "Help the Village by learning whether two players share a team."],
-  ["fool", "neutral", "Be lynched during the day."],
-  ["mason", "village", "Help the Village; know the other Mason(s)."],
-  ["old-man", "village", "Help the Village while surviving the defined healing limit."],
-  ["diseased", "village", "Help the Village and retaliate if attacked."],
-  ["lawyer", "village", "Help the Village by protecting a player from the day's lynch."],
-  ["scapegoat", "village", "Help the Village; be selected by an exact tie."],
-  ["hapless-victim", "village", "Help the Village while absorbing a neighboring death."],
-  ["hangman", "village", "Help the Village and trigger the defined second discussion."],
-  ["martyr", "village", "Help the Village by sacrificing for a lynched player."],
-  ["priest-village", "village", "Help the Village by shielding against Werewolf attacks."],
-  ["necromancer", "village", "Help the Village by using one defined revival."],
-  ["old-crone", "village", "Help the Village by silencing one player each night."],
-  ["hierophant", "village", "Help the Village while learning how many Werewolves remain."],
-  ["spellcaster", "village", "Help the Village by muting or removing a vote."],
-  ["insomniac", "village", "Help the Village by learning the nearest Werewolf when walking."],
-  ["lycan", "village", "Help the Village while appearing Werewolf-aligned to the Seer."],
-  ["mortician", "village", "Help the Village by learning death methods."],
-  ["scryer", "village", "Help the Village until finding the Seer."],
-  ["noble", "village", "Help the Village; skip the next day if killed."],
-  ["aura-seer", "village", "Help the Village by learning whether a player has an ability."],
-  ["big-bad-wolf", "werewolves", "Reach parity with the living non-Werewolves."],
-  ["mystic-wolf", "werewolves", "Reach parity with the living non-Werewolves."],
-  ["omega-wolf", "werewolves", "Reach parity with the living non-Werewolves."],
-  ["sorcerer", "werewolves", "Reach parity with the living non-Werewolves."],
-  ["poisoner-werewolf", "werewolves", "Reach parity with the living non-Werewolves."],
-  ["minion", "werewolves", "Reach parity with the living non-Werewolves."],
-  ["fruit-brute", "werewolves", "Reach parity with the living non-Werewolves."],
-  ["fallen-angel", "werewolves", "Reach parity with the living non-Werewolves."],
-  ["lone-wolf", "werewolves", "Reach parity with the living non-Werewolves."],
-  ["wolf-cub", "werewolves", "Reach parity with the living non-Werewolves."],
-  ["confused-wolf", "werewolves", "Reach parity with the living non-Werewolves."],
-  ["german-shepherd", "werewolves", "Reach parity with the living non-Werewolves."],
-  ["remorseful-werewolf", "werewolves", "Reach parity with the living non-Werewolves."],
-  ["moderator", "neutral", "Complete the Moderator's defined individual objective."],
-  ["murderer", "neutral", "Complete the Murderer's defined individual objective."],
-  ["poisoner-neutral", "neutral", "Complete the Neutral Poisoner's defined individual objective."],
-  ["turncoat", "neutral", "Complete the Turncoat's defined individual objective."],
-  ["bloody-mary", "neutral", "Complete Bloody Mary's defined individual objective."],
-  ["vengeful-ghost", "neutral", "Complete the Vengeful Ghost's defined individual objective."],
-  ["tanner", "neutral", "Be lynched during the day."],
-  ["doppelganger", "neutral", "Complete the Doppelganger's defined individual objective."],
-  ["chef", "neutral", "Complete the Chef's defined individual objective."],
-  ["enchantress", "neutral", "Complete the Enchantress's defined individual objective."],
-  ["arsonist", "neutral", "Complete the Arsonist's defined individual objective."],
-  ["thespian", "neutral", "Complete the Thespian's defined individual objective."],
-  ["cupid", "neutral", "Complete Cupid's defined individual objective."],
-  ["orphan", "neutral", "Complete the Orphan's defined individual objective."],
-  ["guardian-angel", "neutral", "Complete the Guardian Angel's defined individual objective."],
-  ["priest-neutral", "neutral", "Complete the Neutral Priest's defined individual objective."],
-  ["hoodlum", "neutral", "Complete the Hoodlum's defined individual objective."]
-];
-
-for (const [name, faction, winCondition] of CATALOGUE_ROLES) {
-  ROLE_DATABASE[name] = {
-    name,
-    faction,
-    winCondition,
-    description: "Catalogued role; mechanics are UNDEFINED — REQUIRES DESIGN.",
-    activeAbility: null,
-    designStatus: "undefined"
-  };
-}
-
-// Every catalogue entry now has executable active or passive behavior.
-for (const [role, proposal] of Object.entries(ROLE_PROPOSALS)) {
-  Object.assign(ROLE_DATABASE[role], { description: proposal.description, activeAbility: proposal.ability, winCondition: proposal.winCondition, designStatus: "defined" });
-}
+export const ROLE_DATABASE: Record<RoleName, RoleDefinition> = Object.fromEntries(ROLE_FACTIONS.map(([name, faction]) => {
+  const rules = ROLE_RULES[name] ?? CORE_ROLES[name];
+  if (!rules) throw new Error(`Missing rules for role: ${name}`);
+  return [name, { name, faction, description: rules.description, activeAbility: rules.ability, winCondition: rules.winCondition, designStatus: "defined" }];
+}));
 
 export interface RoleAction { ability: string; targets: string[]; option?: string; }
 export interface GameEvent { recipient?: string; text: string; }

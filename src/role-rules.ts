@@ -1,6 +1,6 @@
 /** Role descriptions and rules adopted from the reviewed design draft.
  * Executable actions and phase validation live in abilities.ts and engine.ts. */
-export interface RoleProposal {
+export interface RoleRules {
   description: string;
   ability: string;
   winCondition: string;
@@ -9,7 +9,7 @@ export interface RoleProposal {
 const villageWin = "Win with the Village when the Werewolf faction is eliminated.";
 const wolfWin = "Win with the Werewolf faction when living Werewolves reach parity with all other living players.";
 
-export const ROLE_PROPOSALS: Record<string, RoleProposal> = {
+export const ROLE_RULES: Record<string, RoleRules> = {
   "alpha-werewolf": {
     description: "The pack's elder, feared for turning the Village's own people against it.",
     ability: "Once per game, replace the pack attack with an attempted conversion of a Village player. Doctor protection blocks conversion. The target keeps their role label but becomes Werewolf-aligned and learns the pack; do not convert Neutral roles.",

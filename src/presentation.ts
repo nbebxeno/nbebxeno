@@ -1,4 +1,5 @@
-import type { Faction, GameMode, PrivatePlayerView, PublicGameView, RoleDefinition } from "./engine.ts";
+import type { AbilityDefinition } from "./abilities.ts";
+import type { NumberedAlivePlayer, Phase, Faction, GameMode, PrivatePlayerView, PublicGameView, RoleDefinition } from "./engine.ts";
 import type { LobbySnapshot } from "./session.ts";
 
 export function roleLabel(role: string): string {
@@ -14,19 +15,39 @@ export function factionLabel(faction: Faction): string {
   return { village: "Village", werewolves: "Werewolf", neutral: "Neutral" }[faction];
 }
 
-export function roleCard(view: PrivatePlayerView): string {
+export function abilityCommand(ability: AbilityDefinition): string {
+  const options = ability.id === "allegiance" ? "<village|werewolves>" : "<1|2|3>";
+  const targets = Array.from({ length: ability.targets }, (_, i) => `<${ability.targetKind === "dead" ? "dead " : ""}number${ability.targets > 1 ? ` ${i + 1}` : ""}>`).join(" ");
+  const args = ability.targetKind === "option" ? options : targets;
+  return `!act ${ability.id}${args ? ` ${args}` : ""}`;
+}
+
+export function roleCard(view: PrivatePlayerView, detailed = false): string {
   const abilities = view.abilities ?? [];
   return [
-    "🌑 *LORDXENO · SECRET ROLE*", "",
-    `*${roleLabel(view.role)}*`, `Team: ${factionLabel(view.faction)}`, "",
-    view.roleDefinition.description, "", "*Your objective*", view.roleDefinition.winCondition, "",
-    ...(view.faction === "werewolves" ? ["*Your known Werewolf team*", ...(view.knownTeam?.length ? view.knownTeam.map((ally) => `• ${ally.displayName} — ${roleLabel(ally.role)}`) : ["No other pack members are known to you."]), ""] : []),
+    `🌑 *${roleLabel(view.role)}* · PRIVATE`, `Team: ${factionLabel(view.faction)}`, "",
+    view.roleDefinition.description, "", "*Objective*", view.roleDefinition.winCondition, "",
+    ...(view.faction === "werewolves" ? ["*Known pack*", ...(view.knownTeam?.length ? view.knownTeam.map((ally) => `• ${ally.displayName} — ${roleLabel(ally.role)}`) : ["No other teammates known."]), ""] : []),
     ...(view.personalNotes?.length ? [...view.personalNotes, ""] : []),
-    "*Your abilities*", view.roleDefinition.activeAbility ?? "No active power. Discuss, deduce, and vote.", "",
-    ...abilities.map((ability) => `${roleLabel(ability.phase)}: !act ${ability.id}${ability.targetKind === "option" ? " <option>" : " <number>".repeat(ability.targets)} — ${ability.help}`), "",
-    "Use !actions for your current choices and numbered targets.", "Use !skip to pass on remaining powers this phase.", "",
-    "*During voting*", "Reply here: !vote <number>", "Undo your vote: !unvote", "",
-    "Keep your role and team messages private. Return to the group for discussion."
+    ...(detailed ? ["*Full ability rules*", view.roleDefinition.activeAbility ?? "No active power. Discuss and vote.", ""] : []),
+    ...abilities.map((ability) => `${abilityCommand(ability)} · ${roleLabel(ability.phase)}${detailed ? `\n${ability.help}` : ""}`),
+    ...(!abilities.length ? ["Passive role · effects apply automatically."] : []), "",
+    "!actions · Current choices   !skip · Pass on powers",
+    "!vote <number> · Vote in DM   !unvote · Undo",
+    detailed ? "Keep this card private." : "!details · Full role rules · Keep your card private."
+  ].join("\n");
+}
+
+export function actionCard(input: { phase: Phase; actions: AbilityDefinition[]; alive: NumberedAlivePlayer[]; dead: NumberedAlivePlayer[]; notes: string[] }): string {
+  const { phase, actions, alive, dead, notes } = input;
+  const list = (roster: NumberedAlivePlayer[]) => roster.map(({ number, player }) => `${number}. ${player.displayName}`);
+  return [
+    `🌘 *${roleLabel(phase)} · YOUR ACTIONS*`, "",
+    ...actions.flatMap((ability) => [`${abilityCommand(ability)}\n${ability.help}`]),
+    ...(!actions.length ? ["No active choices in this phase."] : []),
+    ...(actions.some((ability) => ability.targets > 0 && ability.targetKind !== "dead" && ability.targetKind !== "option") ? ["", "*Living targets*", ...list(alive)] : []),
+    ...(actions.some((ability) => ability.targetKind === "dead") ? ["", "*Dead targets · separate numbering*", ...list(dead)] : []),
+    ...(notes.length ? ["", ...notes] : []), "", "!skip · Pass on remaining powers; your vote is separate."
   ].join("\n");
 }
 
@@ -35,11 +56,10 @@ export function lobbyCard(snapshot: LobbySnapshot, mode?: GameMode): string {
   const needed = Math.max(0, 4 - snapshot.players.length);
   return [
     "🌒 *LORDXENO · LOBBY*", "",
-    `Host: ${host}`, `Mode: ${mode ? roleLabel(mode) : "Waiting for host"}`,
-    `Players: ${snapshot.players.length} · minimum 4`, "",
+    `Mode: ${mode ? roleLabel(mode) : "Not chosen"} · Players: ${snapshot.players.length}/4 min`, `Host: ${host}`, "",
     ...snapshot.players.map((player, index) => `${index + 1}. ${player.displayName}${player.id === snapshot.hostId ? " · host" : ""}`), "",
-    ...(mode ? [needed ? `Waiting for ${needed} more ${needed === 1 ? "player" : "players"}.` : "Ready. The host can start the game.", "", "Join: !join", "Leave: !leave", "Host starts: !startgame"]
-      : ["*Host: choose a mode first*", "!mode beginner", "!mode classic", "!mode chaos"])
+    ...(mode ? [needed ? `Waiting for ${needed} more ${needed === 1 ? "player" : "players"}.` : "Ready. The host can start the game.", "", "!join · Join   !leave · Leave   !start · Host starts"]
+      : ["*Host: choose a mode first*", "!mode beginner | classic | chaos"])
   ].join("\n");
 }
 
@@ -66,9 +86,8 @@ export function deceasedLabel(view: PublicGameView, playerId: string): string {
 
 export function statusCard(view: PublicGameView, seconds: number | null): string {
   return ["📜 *LORDXENO · STATUS*", "", `Day ${view.dayNumber} · ${roleLabel(view.phase)}`,
-    `Alive: ${view.players.filter((player) => player.alive).length}/${view.players.length}`,
     ...(seconds === null ? [] : [`Time left: ${seconds}s`]), "",
-    view.phase === "voting" ? "Vote privately: !vote <number>" : view.phase === "night" ? "Check your private messages for your night action." : view.phase === "discussion" ? "Discuss in the group. Keep your role secret." : "This game has ended. Start a new lobby with !lobby.",
+    view.phase === "voting" ? "DM your vote · !vote <number>" : view.phase === "night" ? "Night powers in DM · !actions" : view.phase === "discussion" ? "Discussion open · keep your role secret." : view.phase === "reaction" ? "Final action pending · check your DM." : "Game finished · !lobby to play again.",
     "", ...rosterLines(view)].join("\n");
 }
 
@@ -85,5 +104,12 @@ export function victoryCard(summary: { winner: Faction | null; team: Array<{ id:
     ...(summary.team.length ? ["*Winning team*", ...list(summary.team)] : []),
     ...(summary.personal.length ? ["", "*Personal winners*", ...list(summary.personal)] : []),
     ...(!summary.team.length && !summary.personal.length ? ["No winners this game."] : [])
+  ].join("\n");
+}
+
+export function votingCard(view: PublicGameView): string {
+  return ["⚖️ *YOUR VOTE*", "60s · reply in this chat", "",
+    ...view.players.filter((player) => player.alive).map((player, i) => `${i + 1}. ${player.displayName}`), "",
+    "!vote <number> · Choose   !unvote · Undo", "Missing votes pass at timeout."
   ].join("\n");
 }

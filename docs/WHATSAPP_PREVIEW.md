@@ -1,13 +1,14 @@
-# WhatsApp message preview
+# WhatsApp message previews
+
+Compact cards use WhatsApp bold labels and plain numbered targets. Use `!details` for full role rules and `!help <group>` for command explanations.
 
 ## Lobby
 
 ```text
 🌒 *LORDXENO · LOBBY*
 
+Mode: Classic · Players: 3/4 min
 Host: Ada
-Mode: Classic
-Players: 3 · minimum 4
 
 1. Ada · host
 2. Bayo
@@ -15,47 +16,95 @@ Players: 3 · minimum 4
 
 Waiting for 1 more player.
 
-Join: !join
-Leave: !leave
-Host starts: !startgame
+!join · Join   !leave · Leave   !start · Host starts
 ```
 
-## Private Alpha role card
+## Compact private role
 
 ```text
-🌑 *LORDXENO · SECRET ROLE*
-
-*Alpha Werewolf*
+🌑 *Alpha Werewolf* · PRIVATE
 Team: Werewolf
 
 The pack's elder, feared for turning the Village's own people against it.
 
-*Your objective*
+*Objective*
 Win with the Werewolf faction when living Werewolves reach parity with all other living players.
 
-*Your known Werewolf team*
+*Known pack*
 • Bayo — Werewolf
-• Chidi — Werewolf
 
-*Your abilities*
-Once per game, replace the pack attack with an attempted conversion of a Village player. Doctor protection blocks conversion. The target keeps their role label but becomes Werewolf-aligned and learns the pack; do not convert Neutral roles.
+!act attack <number> · Night
+!act convert <number> · Night
 
-Night: !act attack <number> — Vote for the shared pack target. Tied pack votes mean no attack.
-Night: !act convert <number> — Convert a Village player instead of this night's pack attack (once).
-
-Use !actions for your current choices and numbered targets.
-Use !skip to pass on remaining powers this phase.
-
-*During voting*
-Reply here: !vote <number>
-Undo your vote: !unvote
-
-Keep your role and team messages private. Return to the group for discussion.
+!actions · Current choices   !skip · Pass on powers
+!vote <number> · Vote in DM   !unvote · Undo
+!details · Full role rules · Keep your card private.
 ```
 
-All roles now have active or passive mechanics. Use `!actions` in DM for phase-specific choices and numbered targets.
+## Status
 
-## Victory announcement
+```text
+📜 *LORDXENO · STATUS*
+
+Day 1 · Discussion
+Time left: 120s
+
+Discussion open · keep your role secret.
+
+*Alive · 8*
+1. Ada
+2. Bayo
+3. Chidi
+4. Dami
+5. Eni
+6. Fola
+7. Gabe
+8. Hana
+```
+
+## Voting DM
+
+```text
+⚖️ *YOUR VOTE*
+60s · reply in this chat
+
+1. Ada
+2. Bayo
+3. Chidi
+4. Dami
+5. Eni
+6. Fola
+7. Gabe
+8. Hana
+
+!vote <number> · Choose   !unvote · Undo
+Missing votes pass at timeout.
+```
+
+## Night choices
+
+```text
+🌘 *Night · YOUR ACTIONS*
+
+!act attack <number>
+Vote for the shared pack target. Tied pack votes mean no attack.
+!act convert <number>
+Convert a Village player instead of this night's pack attack (once).
+
+*Living targets*
+1. Ada
+2. Bayo
+3. Chidi
+4. Dami
+5. Eni
+6. Fola
+7. Gabe
+8. Hana
+
+!skip · Pass on remaining powers; your vote is separate.
+```
+
+## Winner list
 
 ```text
 🐺 *WEREWOLVES WIN!*
@@ -63,9 +112,4 @@ All roles now have active or passive mechanics. Use `!actions` in DM for phase-s
 *Winning team*
 1. Ada — Alpha Werewolf
 2. Bayo — Werewolf
-
-*Personal winners*
-1. Chidi — Fool
 ```
-
-Winning faction members are listed even if they died. Personal wins are shown separately from the team result.

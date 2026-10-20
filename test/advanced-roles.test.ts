@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GameEngine, ROLE_DATABASE, type GameState, type RoleAction } from "../src/engine.ts";
+import { GameEngine, ROLE_DATABASE } from "../src/engine.ts";
 import { roleCard } from "../src/presentation.ts";
 
 const rules = { tieRule: "no-elimination" as const, revealRoleOnDeath: true };

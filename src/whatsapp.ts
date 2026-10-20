@@ -7,14 +7,13 @@ import { PermanentGms, canonicalIdentity, matchingParticipant, metadataIsAdmin }
 import { GameSessions } from "./session.ts";
 import { StatsStore } from "./stats.ts";
 import { helpText, resolveCommand, normalizeCommand } from "./commands.ts";
-import { roleCard, lobbyCard, rosterCard, statusCard, rolesCard, roleLabel, deceasedLabel, victoryCard } from "./presentation.ts";
+import { roleCard, lobbyCard, rosterCard, statusCard, rolesCard, roleLabel, deceasedLabel, victoryCard, votingCard } from "./presentation.ts";
 
 const authDirectory = "./.auth/lordxeno";
 const qrImagePath = `${authDirectory}/whatsapp-qr.png`;
 const sessions = new GameSessions({ tieRule: "no-elimination", revealRoleOnDeath: true }, "./.data/lordxeno-games.json");
 const phaseTransitions = new Set<string>();
 const phaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const phaseDeadlines = new Map<string, number>();
 const duplicateJoinWarnings = new Set<string>();
 const commandCooldowns = new Map<string, number>();
 const stats = new StatsStore();
@@ -24,10 +23,6 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 function messageText(message: { conversation?: string | null; extendedTextMessage?: { text?: string | null } | null }): string {
   return message.conversation ?? message.extendedTextMessage?.text ?? "";
-}
-
-function roleMessage(view: ReturnType<GameSessions["startGame"]>["privateViews"][number]): string {
-  return roleCard(view);
 }
 
 function lobbyMessage(snapshot: ReturnType<GameSessions["snapshot"]>): string {
@@ -47,11 +42,9 @@ function schedulePhaseTimer(groupId: string, milliseconds: number, callback: () 
   if (!isActiveGame(groupId)) return;
   const previous = phaseTimers.get(groupId);
   if (previous) clearTimeout(previous);
-  phaseDeadlines.set(groupId, Date.now() + milliseconds);
   sessions.setPhaseDeadline(groupId, Date.now() + milliseconds, nextPhase);
   phaseTimers.set(groupId, setTimeout(() => {
     phaseTimers.delete(groupId);
-    phaseDeadlines.delete(groupId);
     callback();
   }, milliseconds));
 }
@@ -60,7 +53,6 @@ function clearPhaseTimer(groupId: string): void {
   const timer = phaseTimers.get(groupId);
   if (timer) clearTimeout(timer);
   phaseTimers.delete(groupId);
-  phaseDeadlines.delete(groupId);
   try { sessions.setPhaseDeadline(groupId, undefined); } catch { /* session may already be gone */ }
 }
 
@@ -69,7 +61,7 @@ function logPhaseTransition(groupId: string, phase: string, trigger: string): vo
 }
 
 function remainingSeconds(groupId: string): number | null {
-  const deadline = phaseDeadlines.get(groupId);
+  const deadline = sessions.phaseDeadline(groupId);
   return deadline ? Math.max(0, Math.ceil((deadline - Date.now()) / 1000)) : null;
 }
 
@@ -199,7 +191,7 @@ async function startWhatsApp(): Promise<void> {
         continue;
       }
       if (commandName === "help") {
-        await safeSend(socket, message.key.remoteJid, helpText());
+        await safeSend(socket, message.key.remoteJid, helpText(command.slice("!xeno help".length).trim()));
         continue;
       }
       const participantAlias = message.key.participant === participantIdentity(message) ? message.key.participantAlt : message.key.participant;
@@ -231,12 +223,12 @@ async function startWhatsApp(): Promise<void> {
           }
           continue;
         }
-        if (!remoteJid.endsWith("@g.us") && ["actions", "act", "skip", "myrole"].includes(commandName)) {
+        if (!remoteJid.endsWith("@g.us") && ["actions", "act", "skip", "myrole", "details"].includes(commandName)) {
           const actionGroupId = locatePrivateGame(remoteJid, message.key.remoteJidAlt);
           if (commandName === "actions") {
             await safeSend(socket, remoteJid, sessions.actionPrompt(actionGroupId, remoteJid));
-          } else if (commandName === "myrole") {
-            await safeSend(socket, remoteJid, roleMessage(sessions.privateView(actionGroupId, sessions.resolvePlayerId(actionGroupId, remoteJid))));
+          } else if (["myrole", "details"].includes(commandName)) {
+            await safeSend(socket, remoteJid, roleCard(sessions.privateView(actionGroupId, sessions.resolvePlayerId(actionGroupId, remoteJid)), commandName === "details"));
           } else {
             const previousPhase = sessions.gameSnapshot(actionGroupId).phase;
             if (commandName === "skip") sessions.skipAction(actionGroupId, remoteJid);
@@ -314,7 +306,7 @@ async function startWhatsApp(): Promise<void> {
         } else if (commandName === "start") {
           const started = sessions.startGame(message.key.remoteJid, groupIdentity);
           await safeSend(socket, message.key.remoteJid, "🌘 *LORDXENO · THE SUMMONING*\n\nYour secret role is arriving by private message. Keep it to yourself.");
-          for (const view of started.privateViews) await safeSend(socket, view.player.id, roleMessage(view));
+          for (const view of started.privateViews) await safeSend(socket, view.player.id, roleCard(view));
           void enterPhase(socket, remoteJid, "discussion", "☀️ *DAY 1 · DISCUSSION*\n\nYou have 2 minutes. Discuss in the group; voting opens after the first night.", "night");
         } else if (commandName === "status") {
           const lobby = sessions.snapshot(remoteJid);
@@ -327,9 +319,9 @@ async function startWhatsApp(): Promise<void> {
           await safeSend(socket, remoteJid, statusCard(view, seconds));
         } else if (commandName === "roles") {
           await safeSend(socket, remoteJid, rolesCard(sessions.roleSummaries(remoteJid)));
-        } else if (commandName === "myrole") {
+        } else if (["myrole", "details"].includes(commandName)) {
           const view = sessions.privateView(remoteJid, groupIdentity);
-          await safeSend(socket, groupIdentity, roleMessage(view));
+          await safeSend(socket, groupIdentity, roleCard(view, commandName === "details"));
           await safeSend(socket, remoteJid, `${sender.displayName}, your role reminder was sent privately.`);
         } else if (commandName === "graveyard") {
           const deaths = sessions.graveyard(remoteJid);
@@ -479,12 +471,12 @@ async function enterPhase(socket: ReturnType<typeof makeWASocket>, groupId: stri
       if (actual !== "night" && actual !== "voting") throw new GameError("This phase cannot begin now.");
       await setNightAccess(socket, groupId);
       await flushEvents(socket, groupId);
-      await safeSend(socket, groupId, actual === "night" ? "🌑 *NIGHT FALLS*\n\nTime: 60 seconds. Check your private messages for your role actions." : "⚖️ *VOTING IS OPEN*\n\nTime: 60 seconds. Vote and use any voting powers privately.");
+      await safeSend(socket, groupId, actual === "night" ? "🌑 *NIGHT* · 60s\nPowers are in your DM · !actions" : "⚖️ *VOTE* · 60s\nCheck your DM to vote and use powers.");
       const actors = sessions.actionActors(groupId);
       for (const player of current.players.filter((player) => player.alive)) {
-        if (actual === "voting") await safeSend(socket, player.id, `⚖️ *YOUR VOTE*\n\nTime: 60 seconds\n\n${rosterMessage(groupId)}\n\nReply here: !vote <number>\nUndo: !unvote\nMissing votes are skipped at timeout.`);
-        if (actors.includes(player.id)) await safeSend(socket, player.id, `${sessions.actionPrompt(groupId, player.id)}\n\nTime: 60 seconds.`);
-        else if (actual === "night") await safeSend(socket, player.id, "🌑 *NIGHT*\n\nYour role has no active choice tonight. Passive powers apply automatically. Wait for dawn.");
+        if (actual === "voting") await safeSend(socket, player.id, votingCard(sessions.gameSnapshot(groupId)));
+        if (actors.includes(player.id)) await safeSend(socket, player.id, `${sessions.actionPrompt(groupId, player.id)}\n\n⏱ 60s`);
+        else if (actual === "night") await safeSend(socket, player.id, "🌑 *NIGHT* · Rest until dawn.\nYour passive effects apply automatically.");
       }
       schedulePhaseTimer(groupId, 60_000, () => actual === "night" ? void resolveNightPhase(socket, groupId, true) : void resolveVotePhase(socket, groupId));
     }

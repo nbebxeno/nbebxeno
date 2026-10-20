@@ -12,12 +12,13 @@ const exact = (...commands: string[]) => (command: string) => commands.includes(
 const prefix = (value: string) => (command: string) => command.startsWith(value);
 
 export const COMMAND_REGISTRY: readonly CommandDefinition[] = [
+  { name: "details", group: "game", usage: "!details (DM)", description: "Read your complete role rules privately.", matches: exact("!xeno details") },
   { name: "games", group: "admin", usage: "!games (GM, DM)", description: "List games and codes for private GM control.", matches: exact("!xeno games") },
   { name: "gm", group: "admin", usage: "!gm", description: "Check your permanent Game Master or admin access.", matches: exact("!xeno gm") },
   { name: "actions", group: "game", usage: "!actions (DM)", description: "Show your current powers and numbered targets.", matches: exact("!xeno actions") },
   { name: "act", group: "game", usage: "!act <ability> [targets/options] (DM)", description: "Use a power in its permitted phase.", matches: prefix("!xeno act ") },
   { name: "skip", group: "game", usage: "!skip (DM)", description: "Pass on remaining powers this phase; voting is separate.", matches: exact("!xeno skip") },
-  { name: "help", group: "meta", usage: "!help", description: "Show available commands.", matches: exact("!xeno help") },
+  { name: "help", group: "meta", usage: "!help", description: "Show available commands.", matches: (command) => command === "!xeno help" || command.startsWith("!xeno help ") },
   { name: "ping", group: "meta", usage: "!ping", description: "Check the transport connection.", matches: exact("!xeno ping") },
   { name: "lobby", group: "setup", usage: "!lobby", description: "Create a game lobby.", matches: exact("!xeno lobby") },
   { name: "mode", group: "setup", usage: "!mode <classic|beginner|chaos>", description: "Choose the lobby game mode as host.", matches: (command) => command.startsWith("!xeno mode ") },
@@ -62,10 +63,12 @@ export function resolveCommand(command: string): CommandDefinition | undefined {
   return COMMAND_REGISTRY.find((definition) => definition.matches(normalized));
 }
 
-export function helpText(): string {
+export function helpText(section = ""): string {
   const groups: Array<[CommandGroup, string]> = [["setup", "SETUP"], ["game", "GAME"], ["voting", "VOTING"], ["meta", "META / STATS"], ["admin", "ADMIN"]];
-  return "🌑 *LORDXENO · COMMANDS*\n\nGroup chat: lobby, discussion, and game info.\nPrivate chat: votes and night actions.\nShort commands: !join · !status · !vote 2\nThe old !xeno commands still work.\n\n" + groups.map(([group, title]) => [
-    `*${title}*`,
-    ...COMMAND_REGISTRY.filter((command) => command.group === group).map((command) => `${command.usage} - ${command.description}`)
-  ].join("\n")).join("\n\n");
+  const selected = section === "all" ? groups : section ? groups.filter(([group]) => group === section) : groups;
+  if (!selected.length) return "Use !help setup, !help game, !help voting, !help meta, !help admin, or !help all.";
+  return ["🌑 *LORDXENO · HELP*", "Group: setup & discussion · DM: votes & powers", "",
+    ...selected.map(([group, title]) => [`*${title}*`, COMMAND_REGISTRY.filter((command) => command.group === group).map((command) => section ? `${command.usage} — ${command.description}` : command.usage).join(section ? "\n" : " · ")].join("\n")),
+    "", section ? "!help · All groups" : "!help <group> · More detail"
+  ].join("\n");
 }

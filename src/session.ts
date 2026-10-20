@@ -1,4 +1,5 @@
 import { GameEngine, GameError, type GameMode, type GameRules, type NightResolution, type Player, type PrivatePlayerView, type RoleDefinition, ROLE_DATABASE, type VoteSnapshot, type RoleAction } from "./engine.ts";
+import { actionCard } from "./presentation.ts";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
@@ -132,9 +133,6 @@ export class GameSessions {
     return this.requireStartedGame(groupId).allNightActionsSubmitted();
   }
 
-  availableActions(groupId: string, identity: string) {
-    return this.requireStartedGame(groupId).availableActions(this.resolvePlayerId(groupId, identity));
-  }
   actionActors(groupId: string): string[] {
     const engine = this.requireStartedGame(groupId);
     return engine.publicView().players.filter((player) => engine.availableActions(player.id).length > 0).map((player) => player.id);
@@ -143,19 +141,12 @@ export class GameSessions {
     const engine = this.requireStartedGame(groupId);
     const id = this.resolvePlayerId(groupId, identity);
     const actions = engine.availableActions(id);
-    const alive = engine.numberedAlivePlayers().map((entry) => `${entry.number}. ${entry.player.displayName}`).join("\n");
-    const dead = engine.numberedDeadPlayers().map((entry) => `${entry.number}. ${entry.player.displayName}`).join("\n");
-    const lines = ["🌑 *YOUR ACTIONS*", "", `Phase: ${engine.publicView().phase}`, ""];
-    for (const action of actions) {
-      const args = action.targetKind === "option" ? (action.id === "allegiance" ? "<village|werewolves>" : "<1|2|3>") : Array.from({ length: action.targets }, (_, i) => `<${action.targetKind === "dead" ? "dead " : ""}number${action.targets > 1 ? ` ${i + 1}` : ""}>`).join(" ");
-      lines.push(`!act ${action.id}${args ? ` ${args}` : ""}`, action.help, "");
-    }
-    if (!actions.length) lines.push("No active ability is available to you in this phase.", "");
-    lines.push("*Living targets*", alive || "None.");
-    if (actions.some((action) => action.targetKind === "dead")) lines.push("", "*Dead targets · separate numbering*", dead || "None.");
-    lines.push("", ...engine.privateView(id).personalNotes ?? [], "Use !skip to pass on remaining abilities this phase. Your vote is separate.");
-    return lines.join("\n");
+    return actionCard({
+      phase: engine.publicView().phase, actions, alive: engine.numberedAlivePlayers(), dead: engine.numberedDeadPlayers(),
+      notes: engine.privateView(id).personalNotes ?? []
+    });
   }
+
   submitRoleAction(groupId: string, identity: string, ability: string, arguments_: string[]): void {
     const engine = this.requireStartedGame(groupId);
     const id = this.resolvePlayerId(groupId, identity);
@@ -251,7 +242,10 @@ export class GameSessions {
     const engine = this.requireStartedGame(groupId);
     const view = engine.publicView();
     if (view.status !== "ended") throw new GameError("The game has not ended yet.");
-    const players = view.players.map((player) => ({ ...player, role: engine.privateView(player.id).role, faction: engine.privateView(player.id).faction }));
+    const players = view.players.map((player) => {
+      const { role, faction } = engine.privateView(player.id);
+      return { ...player, role, faction };
+    });
     const team = players.filter((player) => view.winner === "neutral"
       ? player.alive && ["enchantress", "murderer", "poisoner-neutral", "arsonist"].includes(player.role) && view.individualWinners.includes(player.id)
       : !!view.winner && player.faction === view.winner);
@@ -259,7 +253,6 @@ export class GameSessions {
   }
   graveyard(groupId: string) { return this.requireStartedGame(groupId).publicView().deaths; }
   settings(groupId: string): string[] { return this.requireLobby(groupId).enabledRoles ?? ["werewolf", "villager", "seer", "doctor", "hunter"]; }
-  setSettings(groupId: string, roles: string[]): void { this.requireLobby(groupId).enabledRoles = roles; }
   completedRecord(groupId: string): { winner: string; individualWinners: string[]; players: CompletedPlayer[] } | null {
     const session = this.requireLobby(groupId);
     const view = session.engine?.publicView();
@@ -276,7 +269,6 @@ export class GameSessions {
     };
   }
   privateView(groupId: string, playerId: string): PrivatePlayerView { return this.requireStartedGame(groupId).privateView(playerId); }
-  nightActors(groupId: string): string[] { return this.requireStartedGame(groupId).requiredNightActors(); }
 
   submitNightAction(groupId: string, actorIdentity: string, targetNumber: number): void {
     const engine = this.requireStartedGame(groupId);
@@ -339,9 +331,9 @@ export class GameSessions {
           engine: entry.engineState ? GameEngine.restore(entry.engineState, this.rules) : undefined,
           recorded: entry.recorded,
           enabledRoles: entry.enabledRoles,
-          phaseDeadline: entry.phaseDeadline
-          , phaseNext: entry.phaseNext
-          , mode: entry.mode
+          phaseDeadline: entry.phaseDeadline,
+          phaseNext: entry.phaseNext,
+          mode: entry.mode
         });
       }
       this.persist();
@@ -361,9 +353,9 @@ export class GameSessions {
       engineState: session.engine?.stateSnapshot(),
       recorded: session.recorded,
       enabledRoles: session.enabledRoles,
-      phaseDeadline: session.phaseDeadline
-      , phaseNext: session.phaseNext
-      , mode: session.mode
+      phaseDeadline: session.phaseDeadline,
+      phaseNext: session.phaseNext,
+      mode: session.mode
     }));
     writeFileSync(this.filePath, JSON.stringify(stored, null, 2));
   }

@@ -34,3 +34,12 @@ test("short commands accept case and whitespace while legacy commands still reso
   assert.equal(resolveCommand("!xeno")?.name, "help");
   for (const text of ["join", "status", "let's !vote 2", "!unknown", "!xenojoin"]) assert.equal(resolveCommand(text), undefined);
 });
+
+test("help supports compact overview and filtered full explanations", () => {
+  assert.ok(helpText().length < helpText("all").length);
+  assert.match(helpText("voting"), /Cast a private lynch vote/);
+  assert.doesNotMatch(helpText("voting"), /!kick/);
+  assert.match(helpText("invalid"), /!help all/);
+  assert.equal(resolveCommand("!help voting")?.name, "help");
+  assert.equal(resolveCommand("!details")?.name, "details");
+});
