@@ -3,11 +3,11 @@ import test from "node:test";
 import { COMMAND_REGISTRY, helpText, resolveCommand } from "../src/commands.ts";
 
 test("help is generated from every registered command", () => {
-  const output = helpText();
+  const output = helpText("all");
   for (const command of COMMAND_REGISTRY) {
     assert.match(output, new RegExp(command.usage.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
-  assert.match(output, /\*SETUP\*/);
+  assert.match(output, /\*LOBBY & SETUP\*/);
   assert.match(output, /\*VOTING\*/);
 });
 

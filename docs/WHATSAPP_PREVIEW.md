@@ -128,3 +128,50 @@ The baker claims his garlic buns deserve the credit.
 Scenes vary by game and actual events. Death cards retain role reveals. Players can DM `!lastwords Tell My Cat I Tried` within 15 seconds; the group receives their original message once. Finished games offer `!replay` and a short aftermath.
 
 `!lb` now renders a midnight-and-gold PNG table with player names, wins, win rate, and games; text remains available automatically if rendering or delivery fails.
+
+## Help handbook
+
+```text
+✦ *LORDXENO · HELP*
+_The village handbook_
+────────────────
+
+*YOUR NEXT MOVE*
+!help setup · Start a game
+!help game · Players & status
+!help powers · Your role actions
+!help voting · Cast your vote
+!help meta · Stats & replays
+!help admin · GM controls
+
+*THE BASICS*
+Group → lobby & discussion
+DM → votes & secret powers
+
+_Pick a guide above. Short commands work._
+```
+
+### Voting guide
+
+```text
+✦ *LORDXENO · HELP*
+_The village handbook_
+────────────────
+
+*VOTING*
+_Vote in DM. Results appear in the group._
+
+*!vote <number> (DM)*
+  Cast a private lynch vote.
+
+*!unvote (DM)*
+  Retract your private vote.
+
+*!votes*
+  Show the current vote tally.
+
+*!resolve*
+  Resolve the completed vote.
+
+!help · Back to the handbook
+```
