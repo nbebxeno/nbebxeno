@@ -33,6 +33,7 @@ const phaseTransitions = new Set<string>();
 const phaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const duplicateJoinWarnings = new Set<string>();
 const commandCooldowns = new Map<string, number>();
+const packCooldowns = new Map<string, number>();
 const stats = new StatsStore();
 const permanentGms = new PermanentGms();
 let activeSocket: ReturnType<typeof makeWASocket> | null = null;
@@ -274,6 +275,24 @@ async function startWhatsApp(): Promise<void> {
       const senderIdentities = [groupIdentity, message.key.participant, message.key.participantAlt, (message.key as { participantPn?: string }).participantPn];
       const sender = { id: groupIdentity, displayName: message.pushName ?? groupIdentity };
       try {
+        if (commandName === "pack") {
+          if (remoteJid.endsWith("@g.us")) throw new GameError("Pack whispers belong in DM. Send !pack <message> privately to the bot.");
+          const groupId = locatePrivateGame(remoteJid, message.key.remoteJidAlt);
+          const words = text.replace(/^!(?:xeno\s+)?pack(?:\s+|$)/i, "");
+          const relay = sessions.packMessage(groupId, remoteJid, words);
+          const key = `${groupId}:${relay.senderId}`;
+          const sentAt = packCooldowns.get(key);
+          if (sentAt !== undefined && Date.now() - sentAt < 2_000) throw new GameError("Give the pack a second. One whisper every 2 seconds.");
+          packCooldowns.set(key, Date.now());
+          let delivered = 0;
+          for (const recipient of relay.recipients) {
+            try { await socket.sendMessage(recipient, { text: relay.text }); delivered++; }
+            catch { console.error("A pack whisper could not be sent to one recipient."); }
+          }
+          if (!delivered) packCooldowns.delete(key);
+          await safeSend(socket, remoteJid, delivered ? `Whisper sent to ${delivered} packmate${delivered === 1 ? "" : "s"}.${delivered < relay.recipients.length ? " Some deliveries failed; try again shortly." : ""}` : "The whisper could not be sent. Try again shortly.");
+          continue;
+        }
         if (commandName === "lastwords") {
           if (remoteJid.endsWith("@g.us")) throw new GameError("Send your last words in DM: !lastwords <message>.");
           let identity = remoteJid, groupId: string;

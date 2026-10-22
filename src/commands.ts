@@ -12,6 +12,7 @@ const exact = (...commands: string[]) => (command: string) => commands.includes(
 const prefix = (value: string) => (command: string) => command.startsWith(value);
 
 export const COMMAND_REGISTRY: readonly CommandDefinition[] = [
+  { name: "pack", group: "game", usage: "!pack <message>", description: "DM a night-time message to your known living pack (400 characters).", matches: (command) => command === "!xeno pack" || command.startsWith("!xeno pack ") },
   { name: "brief", group: "meta", usage: "!brief", description: "What Werewolf is and how to play. Alias: !explain.", matches: exact("!xeno brief", "!xeno explain") },
   { name: "resume", group: "admin", usage: "!resume [game-code]", description: "Explicitly resume a saved game paused after restart (GM/admin).", matches: (command) => command === "!xeno resume" || command.startsWith("!xeno resume ") },
   { name: "replay", group: "meta", usage: "!replay [page]", description: "Read the finished game's sealed timeline.", matches: (command) => command === "!xeno replay" || command.startsWith("!xeno replay ") },
@@ -68,7 +69,7 @@ export function resolveCommand(command: string): CommandDefinition | undefined {
 }
 
 const HELP_GROUPS: Array<[CommandGroup, string]> = [["setup", "LOBBY & SETUP"], ["game", "THE VILLAGE"], ["voting", "VOTING"], ["meta", "STATS & HISTORY"], ["admin", "GAME MASTER"]];
-const POWER_NAMES = new Set(["myrole", "details", "actions", "act", "skip", "night", "lastwords"]);
+const POWER_NAMES = new Set(["pack", "myrole", "details", "actions", "act", "skip", "night", "lastwords"]);
 const HELP_HEADER = "✦ *LORDXENO · HELP*\n_The village handbook_\n────────────────";
 
 function commandRows(commands: readonly CommandDefinition[]): string {

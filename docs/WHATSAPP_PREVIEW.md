@@ -175,3 +175,17 @@ _Vote in DM. Results appear in the group._
 
 !help · Back to the handbook
 ```
+
+## Pack whisper (DM only, at night)
+
+```text
+✦ *LORDXENO / PACK WHISPER*
+────────────────
+*Amara*
+
+> Let's Pick Number 4 Tonight 😈
+
+!pack <message> · Reply to your pack
+```
+
+Only living teammates with mutual pack recognition receive the message. The public group and replay receive nothing.

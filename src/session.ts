@@ -179,6 +179,26 @@ export class GameSessions {
     const engine = this.requireStartedGame(groupId);
     return engine.publicView().players.filter((player) => engine.availableActions(player.id).length > 0).map((player) => player.id);
   }
+  packMessage(groupId: string, identity: string, message: string): { senderId: string; recipients: string[]; text: string } {
+    const engine = this.requireStartedGame(groupId);
+    const view = engine.publicView();
+    if (view.status !== "active") throw new GameError("Pack chat is closed. This game has ended.");
+    const id = this.resolvePlayerId(groupId, identity);
+    if (!view.players.some(player => player.id === id && player.alive)) throw new GameError("Eliminated players cannot use pack chat.");
+    const sender = engine.privateView(id);
+    if (sender.faction !== "werewolves") throw new GameError("Pack chat is only for the Werewolf faction.");
+    if (view.phase !== "night") throw new GameError("Pack chat opens at night. Send !pack <message> then.");
+    const words = message.replace(/[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, " ").replace(/\s+/g, " ").trim();
+    if (!words || [...words].length > 400) throw new GameError("Use !pack <message> with 1–400 characters.");
+    // Mutual recognition preserves hidden-pack roles such as Minion/Sorcerer.
+    // Current faction/knowledge is queried each time, so conversions apply immediately.
+    const recipients = sender.knownWerewolves.filter(other => other !== id && view.players.some(player => player.id === other && player.alive)
+      && engine.privateView(other).faction === "werewolves" && engine.privateView(other).knownWerewolves.includes(id));
+    if (!recipients.length) throw new GameError("No living packmates who mutually know you are available for pack chat.");
+    const name = sender.player.displayName.replace(/[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069*_~`]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60) || "Packmate";
+    return { senderId: id, recipients, text: `✦ *LORDXENO / PACK WHISPER*\n────────────────\n*${name}*\n\n> ${words}\n\n!pack <message> · Reply to your pack` };
+  }
+
   actionPrompt(groupId: string, identity: string): string {
     const engine = this.requireStartedGame(groupId);
     const id = this.resolvePlayerId(groupId, identity);

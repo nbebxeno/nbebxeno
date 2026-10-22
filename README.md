@@ -183,3 +183,11 @@ Clock recovery: live `notify` commands no longer depend on agreement between Wha
 Help now opens a short category menu rather than concatenating the command registry into a single paragraph. Use `!help setup`, `!help game`, `!help powers`, `!help voting`, `!help meta`, or `!help admin`. Category pages put each command on its own line with its explanation below. The private-powers guide is separate from the public village commands. `!help all` remains the full reference when explicitly requested.
 
 New players can use `!brief` or `!explain` in a group or DM for the same short Werewolf introduction: secret roles, night powers, daytime discussion, private voting, faction goals, and how to join an open lobby. No game needs to be running.
+
+## Private pack whispers
+
+During an active game's **night phase**, a living Werewolf can DM `!pack <message>` to the bot. It relays a named, quoted message privately to the sender's mutually known, living Werewolf teammates in the same game. Example: `!pack Let's target number 4 tonight`. The body preserves capitalization and emoji, allows 1–400 Unicode characters, and has a two-second per-player cooldown shared across PN/LID aliases.
+
+Converted Village players use their current faction and pack knowledge immediately. The channel preserves hidden-role rules: a Minion, Sorcerer, Lone Wolf, or Confused Wolf is not exposed by a message to teammates who do not know them. No recipients means no relay. Dead players, other factions, daytime/voting/reaction phases, ended games, startup-paused games, and group-chat sends are rejected. As with other secret role actions, use your player account in DM rather than sending gameplay commands as the bot's linked account.
+
+Whispers do not spend actions, extend timers, enter the public event queue, or get stored in the replay. The sender receives a sent-count confirmation; delivery failures are reported without claiming everyone received it. The command appears in Werewolf role cards and `!help powers`.

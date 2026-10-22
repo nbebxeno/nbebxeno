@@ -33,6 +33,7 @@ export function roleCard(view: PrivatePlayerView, detailed = false): string {
     `🌑 *${roleLabel(view.role)}* · PRIVATE`, `Team: ${factionLabel(view.faction)}`, RULE_LINE, "",
     view.roleDefinition.description, "", "*Objective*", view.roleDefinition.winCondition, "",
     ...(view.faction === "werewolves" ? ["*Known pack*", ...(view.knownTeam?.length ? view.knownTeam.map((ally) => `• ${ally.displayName} — ${roleLabel(ally.role)}`) : ["No other teammates known."]), ""] : []),
+    ...(view.faction === "werewolves" ? ["!pack <message> · Whisper to known packmates at night", ""] : []),
     ...(view.personalNotes?.length ? [...view.personalNotes, ""] : []),
     ...(detailed ? ["*Full ability rules*", view.roleDefinition.activeAbility ?? "No active power. Discuss and vote.", ""] : []),
     ...abilities.map((ability) => `${abilityCommand(ability)} · ${roleLabel(ability.phase)}${detailed ? `\n${ability.help}` : ""}`),
