@@ -15,6 +15,11 @@ import { roleCard, lobbyCard, rosterCard, statusCard, rolesCard, roleLabel, dece
 const authDirectory = "./.auth/lordxeno";
 const qrImagePath = `${authDirectory}/whatsapp-qr.png`;
 const sessions = new GameSessions({ tieRule: "no-elimination", revealRoleOnDeath: true }, "./.data/lordxeno-games.json");
+// Cold starts must never advance an old saved game without a manager's decision.
+const startupPaused = new Set(sessions.resumableGames().map((game) => game.groupId));
+const recoveryNotified = new Set<string>();
+const processStartedAt = Date.now();
+const seenMessages = new Set<string>();
 const phaseTransitions = new Set<string>();
 const phaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const duplicateJoinWarnings = new Set<string>();
@@ -24,8 +29,23 @@ const permanentGms = new PermanentGms();
 let activeSocket: ReturnType<typeof makeWASocket> | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-function messageText(message: { conversation?: string | null; extendedTextMessage?: { text?: string | null } | null }): string {
-  return message.conversation ?? message.extendedTextMessage?.text ?? "";
+interface TextMessage {
+  conversation?: string | null;
+  extendedTextMessage?: { text?: string | null } | null;
+  ephemeralMessage?: { message?: TextMessage | null } | null;
+  viewOnceMessage?: { message?: TextMessage | null } | null;
+  viewOnceMessageV2?: { message?: TextMessage | null } | null;
+}
+function messageText(message: TextMessage): string {
+  let current = message;
+  for (let depth = 0; depth < 5; depth++) {
+    const text = current.conversation ?? current.extendedTextMessage?.text;
+    if (text != null) return text;
+    const nested = current.ephemeralMessage?.message ?? current.viewOnceMessage?.message ?? current.viewOnceMessageV2?.message;
+    if (!nested) break;
+    current = nested;
+  }
+  return "";
 }
 
 function lobbyMessage(snapshot: ReturnType<GameSessions["snapshot"]>): string {
@@ -37,7 +57,7 @@ function rosterMessage(groupId: string): string {
 }
 
 function isActiveGame(groupId: string): boolean {
-  try { return sessions.gameSnapshot(groupId).status === "active"; }
+  try { return !startupPaused.has(groupId) && sessions.gameSnapshot(groupId).status === "active"; }
   catch { return false; }
 }
 
@@ -114,13 +134,17 @@ function participantIdentity(message: { key: { participant?: string | null; part
   return candidates.find((id) => id?.endsWith("@s.whatsapp.net")) ?? message.key.participant ?? message.key.remoteJid ?? "";
 }
 
-function locatePrivateGame(jid: string, alternate?: string | null): string {
-  try { return sessions.groupForIdentity(jid); }
+function locatePrivateGame(jid: string, alternate?: string | null, allowPaused = false): string {
+  const check = (groupId: string) => {
+    if (!allowPaused && startupPaused.has(groupId)) throw new GameError("This saved game is paused after restart. A GM/admin must use !resume or !endgame in the group.");
+    return groupId;
+  };
+  try { return check(sessions.groupForIdentity(jid)); }
   catch (error) {
     if (!alternate || !(error instanceof GameError) || !error.message.startsWith("Unknown player")) throw error;
     const groupId = sessions.groupForIdentity(alternate);
     sessions.registerAlias(groupId, sessions.resolvePlayerId(groupId, alternate), jid);
-    return groupId;
+    return check(groupId);
   }
 }
 
@@ -157,11 +181,20 @@ async function startWhatsApp(): Promise<void> {
     }
     if (connection === "open") {
       console.log("lordxeno is connected to WhatsApp.");
+      for (const groupId of startupPaused) {
+        if (recoveryNotified.has(groupId)) continue;
+        recoveryNotified.add(groupId);
+        await setDiscussionAccess(socket, groupId);
+        await safeSend(socket, groupId, "Saved game PAUSED after restart. No phases will advance. A group admin or GM can use !endgame to cancel, or !resume to continue. Chat is open if I have admin access.");
+      }
       resumeSavedTimers(socket);
     }
     if (connection === "close") {
       if (activeSocket !== socket) return;
       activeSocket = null;
+      // Preserve deadlines, but do not advance phases while disconnected.
+      for (const timer of phaseTimers.values()) clearTimeout(timer);
+      phaseTimers.clear();
       const statusCode = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode;
       if (statusCode !== DisconnectReason.loggedOut) {
         if (!reconnectTimer) {
@@ -177,14 +210,25 @@ async function startWhatsApp(): Promise<void> {
     }
   });
 
-  socket.ev.on("messages.upsert", async ({ messages }) => {
+  socket.ev.on("messages.upsert", async ({ messages, type }) => {
+    if (activeSocket !== socket || (type && type !== "notify")) return;
+    // History sync and offline command delivery must not replay old !start/!end commands.
+
     for (const message of messages) {
       if (!message.message || !message.key.remoteJid) continue;
+      const timestamp = Number(message.messageTimestamp);
+      if (Number.isFinite(timestamp) && timestamp > 0 && timestamp * 1000 < processStartedAt - 3_000) continue;
+      const messageId = message.key.id ? `${message.key.remoteJid}:${message.key.participant ?? ""}:${message.key.fromMe ? "own" : "peer"}:${message.key.id}` : undefined;
+      if (messageId) {
+        if (seenMessages.has(messageId)) continue;
+        seenMessages.add(messageId);
+        if (seenMessages.size > 5_000) seenMessages.delete(seenMessages.values().next().value!);
+      }
       const remoteJid = message.key.remoteJid;
       const text = messageText(message.message).trim();
       const command = normalizeCommand(text);
       const commandName = resolveCommand(command)?.name;
-      if (!commandName || (message.key.fromMe && !["endgame", "kick", "gm", "games"].includes(commandName))) continue;
+      if (!commandName || (message.key.fromMe && !["endgame", "resume", "kick", "gm", "games", "help", "ping", "status", "players"].includes(commandName))) continue;
       const commandKey = `${message.key.remoteJid}:${participantIdentity(message)}:${command}`;
       const lastCommand = commandCooldowns.get(commandKey) ?? 0;
       if (Date.now() - lastCommand < 750) continue;
@@ -213,7 +257,7 @@ async function startWhatsApp(): Promise<void> {
           await safeSend(socket, remoteJid, "Your last words have reached the square. Rest dramatically.");
           continue;
         }
-        if (!remoteJid.endsWith("@g.us") && ["gm", "games", "endgame"].includes(commandName)) {
+        if (!remoteJid.endsWith("@g.us") && ["gm", "games", "endgame", "resume"].includes(commandName)) {
           const privateIdentities = [remoteJid, message.key.remoteJidAlt];
           const permanent = await managerAccess(socket, undefined, privateIdentities, message.key.fromMe ?? false) === "gm";
           const games = sessions.manageableGames();
@@ -221,18 +265,23 @@ async function startWhatsApp(): Promise<void> {
             await safeSend(socket, remoteJid, permanent ? "🎮 Permanent Game Master access: yes. Use !games or !endgame here in DM." : "Permanent Game Master access: no. Configure your number locally with the gm setup command.");
           } else if (commandName === "games") {
             if (!permanent) throw new GameError("Only a permanent Game Master can list all games.");
-            await safeSend(socket, remoteJid, games.length ? ["🎮 *GM · ACTIVE GAMES*", "", ...games.map((game) => `${game.host}'s game · ${game.phase} · ${game.players} players\n!endgame ${game.code}`)].join("\n") : "No active games or lobbies.");
+            await safeSend(socket, remoteJid, games.length ? ["🎮 *GM · ACTIVE GAMES*", "", ...games.map((game) => `${game.host}'s game · ${startupPaused.has(game.groupId) ? "PAUSED / " : ""}${game.phase} · ${game.players} players\n!endgame ${game.code} · !resume ${game.code}`)].join("\n") : "No active games or lobbies.");
           } else {
-            const code = command.slice("!xeno endgame".length).trim();
+            const code = command.slice(`!xeno ${commandName}`.length).trim();
             let target = code ? games.find((game) => game.code === code) : undefined;
             if (!code) {
-              try { const groupId = locatePrivateGame(remoteJid, message.key.remoteJidAlt); target = games.find((game) => game.groupId === groupId); }
+              try { const groupId = locatePrivateGame(remoteJid, message.key.remoteJidAlt, true); target = games.find((game) => game.groupId === groupId); }
               catch { if (permanent && games.length === 1) target = games[0]; }
             }
-            if (!target) throw new GameError(permanent ? "Use !games, then !endgame <game-code> to choose a running game or lobby." : "Send !endgame in your group or specify its game code.");
+            if (!target) throw new GameError(permanent ? "Use !games, then !endgame <game-code> or !resume <game-code> to choose a saved game." : "Send !endgame in your group or specify its game code.");
             if (!permanent && !await managerAccess(socket, target.groupId, privateIdentities, message.key.fromMe ?? false)) throw new GameError("Only a group admin or permanent Game Master can end this game.");
-            await stopGame(socket, target.groupId, message.pushName ?? "Game Master");
-            await safeSend(socket, remoteJid, "🛑 Game ended. The group has been notified.");
+            if (commandName === "resume") {
+              await resumeGame(socket, target.groupId);
+              await safeSend(socket, remoteJid, "Game resumed. The group has been notified.");
+            } else {
+              await stopGame(socket, target.groupId, message.pushName ?? "Game Master");
+              await safeSend(socket, remoteJid, "🛑 Game ended. The group has been notified.");
+            }
           }
           continue;
         }
@@ -289,14 +338,22 @@ async function startWhatsApp(): Promise<void> {
           continue;
         }
         if (!message.key.remoteJid.endsWith("@g.us") || !command.startsWith("!xeno ")) continue;
-        if (commandName === "games") {
+        if (startupPaused.has(remoteJid) && ["lobby", "start", "mode", "join", "leave", "night", "night-resolve", "resolve", "act", "skip"].includes(commandName)) {
+          throw new GameError("This saved game is paused after restart. Use !endgame to cancel, or !resume to continue (GM/admin).");
+        }
+        if (commandName === "resume") {
+          if (!await managerAccess(socket, remoteJid, senderIdentities, message.key.fromMe ?? false)) throw new GameError("Only a group admin or permanent Game Master can resume a game.");
+          if (command !== "!xeno resume") throw new GameError("In a group, use !resume without a code.");
+          await resumeGame(socket, remoteJid);
+        } else if (commandName === "games") {
           throw new GameError("Use !games in DM for private Game Master control.");
         } else if (commandName === "gm") {
           const access = await managerAccess(socket, remoteJid, senderIdentities, message.key.fromMe ?? false);
           await safeSend(socket, remoteJid, access === "gm" ? "🎮 Permanent Game Master access: yes. You can use !endgame and !kick without being a group admin." : access === "admin" ? "You have group-admin access. Permanent Game Master access: no." : "You do not have Game Master or group-admin access.");
         } else if (commandName === "lobby") {
+          const lobby = sessions.createLobby(remoteJid, sender);
           clearPhaseTimer(remoteJid);
-          await safeSend(socket, message.key.remoteJid, lobbyMessage(sessions.createLobby(message.key.remoteJid, sender)));
+          await safeSend(socket, remoteJid, lobbyMessage(lobby));
           stats.rememberName(sender.id, sender.displayName);
           if (participantAlias && participantAlias !== groupIdentity) sessions.registerAlias(remoteJid, groupIdentity, participantAlias);
         } else if (commandName === "mode") {
@@ -331,7 +388,7 @@ async function startWhatsApp(): Promise<void> {
           }
           const view = sessions.gameSnapshot(remoteJid);
           const seconds = remainingSeconds(remoteJid);
-          await safeSend(socket, remoteJid, statusCard(view, seconds));
+          await safeSend(socket, remoteJid, `${startupPaused.has(remoteJid) ? "*PAUSED AFTER RESTART* · !endgame or !resume\n\n" : ""}${statusCard(view, startupPaused.has(remoteJid) ? null : seconds)}`);
         } else if (commandName === "roles") {
           await safeSend(socket, remoteJid, rolesCard(sessions.roleSummaries(remoteJid)));
         } else if (["myrole", "details"].includes(commandName)) {
@@ -399,6 +456,7 @@ async function startWhatsApp(): Promise<void> {
           if (duplicateJoinWarnings.has(joinWarningKey)) continue;
           duplicateJoinWarnings.add(joinWarningKey);
         }
+        if (!(error instanceof GameError)) console.error(`Command ${commandName} failed:`, error);
         const response = error instanceof GameError ? error.message : "The command could not be completed.";
         await safeSend(socket, message.key.remoteJid, response);
       }
@@ -408,6 +466,7 @@ async function startWhatsApp(): Promise<void> {
 
 function resumeSavedTimers(socket: ReturnType<typeof makeWASocket>): void {
   for (const game of sessions.resumableGames()) {
+    if (startupPaused.has(game.groupId) || phaseTimers.has(game.groupId) || phaseTransitions.has(game.groupId)) continue;
     const milliseconds = Math.max(0, (game.deadline ?? Date.now()) - Date.now());
     if (game.phase === "discussion") {
       const nextPhase = game.nextPhase ?? "night";
@@ -422,8 +481,21 @@ function resumeSavedTimers(socket: ReturnType<typeof makeWASocket>): void {
   }
 }
 
+async function resumeGame(socket: ReturnType<typeof makeWASocket>, groupId: string): Promise<void> {
+  if (!startupPaused.has(groupId)) throw new GameError("This game is not paused after restart.");
+  const game = sessions.resumableGames().find((entry) => entry.groupId === groupId);
+  if (!game) throw new GameError("There is no active saved game to resume.");
+  startupPaused.delete(groupId);
+  await safeSend(socket, groupId, "Game resumed by a manager. This phase gets a fresh timer; saved roles, votes, and actions are retained.");
+  if (game.phase === "reaction") await enterReaction(socket, groupId);
+  else if (game.phase === "discussion" || game.phase === "night" || game.phase === "voting") {
+    await enterPhase(socket, groupId, game.phase, "Discussion resumed. Meet in the square.", game.nextPhase ?? "night");
+  }
+}
+
 async function stopGame(socket: ReturnType<typeof makeWASocket>, groupId: string, actorName: string): Promise<void> {
   sessions.endGame(groupId);
+  startupPaused.delete(groupId);
   clearPhaseTimer(groupId);
   const reopened = await setDiscussionAccess(socket, groupId);
   await safeSend(socket, groupId, `🛑 Game ended by ${actorName}. ${reopened ? "Group chat is open." : "I could not reopen group chat; a group admin needs to open it manually."}`);

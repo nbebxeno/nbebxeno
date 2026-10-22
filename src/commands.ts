@@ -12,6 +12,7 @@ const exact = (...commands: string[]) => (command: string) => commands.includes(
 const prefix = (value: string) => (command: string) => command.startsWith(value);
 
 export const COMMAND_REGISTRY: readonly CommandDefinition[] = [
+  { name: "resume", group: "admin", usage: "!resume [game-code]", description: "Explicitly resume a saved game paused after restart (GM/admin).", matches: (command) => command === "!xeno resume" || command.startsWith("!xeno resume ") },
   { name: "replay", group: "meta", usage: "!replay [page]", description: "Read the finished game's sealed timeline.", matches: (command) => command === "!xeno replay" || command.startsWith("!xeno replay ") },
   { name: "lastwords", group: "game", usage: "!lastwords <message> (DM)", description: "Your one final message, within 15 seconds of death.", matches: (command) => command === "!xeno lastwords" || command.startsWith("!xeno lastwords ") },
   { name: "details", group: "game", usage: "!details (DM)", description: "Read your complete role rules privately.", matches: exact("!xeno details") },

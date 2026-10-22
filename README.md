@@ -167,3 +167,11 @@ Phase cards now tell short stories from Briar Hollow, with restrained borders an
 - `!lb` or `!leaderboard` — a PNG Hall of Fame showing the top ten names, wins, win rate, and games. Names are remembered from joins and completed games; older unidentified entries appear as Villager numbers. Rendering or image-send failures fall back to text.
 
 The image renderer uses WebAssembly rather than a native image module. Android's Roboto/Noto Sans or an installed Linux font is used; optionally set `LORDXENO_FONT_PATH` to a readable font file. Run `npm ci` when updating to install the renderer dependency.
+
+## Restart recovery and emergency control
+
+A cold start loads saved games **paused**. Expired timers do not start or advance phases. On connecting, the bot attempts to reopen each paused group's chat and posts one recovery notice. A group admin or permanent GM can send `!endgame` to cancel or `!resume` to continue. In DM, use `!games` then `!endgame <code>` / `!resume <code>`. Resume retains roles/votes/actions and gives the current phase a fresh timer (discussion 120s, night/voting 60s, reactions 30s). An ordinary connection reconnect within the same process retains running-game deadlines; this differs from restarting Node.
+
+`!help`, `!ping`, `!status`, and `!players` now also work from the linked bot account, alongside GM controls. Ordinary own messages still cannot join or start games. Disappearing-message wrappers are supported. Synced history, pre-startup commands, and duplicate message IDs do not run commands again. Send a fresh command after reconnecting.
+
+To stop immediately in Termux, press CTRL then C. This does not erase your WhatsApp pairing or GM configuration. If the bot cannot reopen a locked group, a WhatsApp group admin must change Send messages back to Everyone manually.
