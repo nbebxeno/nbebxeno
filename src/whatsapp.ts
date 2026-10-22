@@ -9,7 +9,7 @@ import { discussionStory, nightStory, votingStory, dawnStory, verdictStory } fro
 import { replayCard, replayHighlights } from "./replay.ts";
 import { leaderboardPng, leaderboardName } from "./leaderboard-image.ts";
 import { StatsStore } from "./stats.ts";
-import { helpText, resolveCommand, normalizeCommand } from "./commands.ts";
+import { briefText, helpText, resolveCommand, normalizeCommand } from "./commands.ts";
 import { roleCard, lobbyCard, rosterCard, statusCard, rolesCard, roleLabel, deceasedLabel, victoryCard, votingCard, phaseBanner } from "./presentation.ts";
 
 const authDirectory = "./.auth/lordxeno";
@@ -234,7 +234,7 @@ async function startWhatsApp(): Promise<void> {
       const timestamp = Number(message.messageTimestamp);
       const hasTimestamp = Number.isFinite(timestamp) && timestamp > 0;
       const olderThanStartup = hasTimestamp && timestamp * 1000 < processStartedAt - 3_000;
-      const recoveryRead = ["ping", "help", "gm", "games", "status", "players"].includes(commandName);
+      const recoveryRead = ["ping", "help", "brief", "gm", "games", "status", "players"].includes(commandName);
       const historicalDelivery = type !== "notify" && ((type === "append" && !hasTimestamp) || olderThanStartup);
       const recoveryEnd = commandName === "endgame" && (startupPaused.has(remoteJid) || !remoteJid.endsWith("@g.us"));
       // notify is Baileys' live-delivery signal. Do not reject live commands
@@ -250,7 +250,7 @@ async function startWhatsApp(): Promise<void> {
         seenMessages.add(messageId);
         if (seenMessages.size > 5_000) seenMessages.delete(seenMessages.values().next().value!);
       }
-      if (message.key.fromMe && !["endgame", "resume", "kick", "gm", "games", "help", "ping", "status", "players"].includes(commandName)) { inboundLog(`skip=own-gameplay-command command=${commandName}`); continue; }
+      if (message.key.fromMe && !["endgame", "resume", "kick", "gm", "games", "help", "brief", "ping", "status", "players"].includes(commandName)) { inboundLog(`skip=own-gameplay-command command=${commandName}`); continue; }
       inboundLog(`command=${commandName} own=${Boolean(message.key.fromMe)} scope=${remoteJid.endsWith("@g.us") ? "group" : "dm"}`);
       const commandKey = `${message.key.remoteJid}:${participantIdentity(message)}:${command}`;
       const lastCommand = commandCooldowns.get(commandKey) ?? 0;
@@ -258,6 +258,10 @@ async function startWhatsApp(): Promise<void> {
       commandCooldowns.set(commandKey, Date.now());
       if (commandName === "ping") {
         await safeSend(socket, message.key.remoteJid, "lordxeno transport online.");
+        continue;
+      }
+      if (commandName === "brief") {
+        await safeSend(socket, remoteJid, briefText());
         continue;
       }
       if (commandName === "help") {

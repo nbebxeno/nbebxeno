@@ -12,6 +12,7 @@ const exact = (...commands: string[]) => (command: string) => commands.includes(
 const prefix = (value: string) => (command: string) => command.startsWith(value);
 
 export const COMMAND_REGISTRY: readonly CommandDefinition[] = [
+  { name: "brief", group: "meta", usage: "!brief", description: "What Werewolf is and how to play. Alias: !explain.", matches: exact("!xeno brief", "!xeno explain") },
   { name: "resume", group: "admin", usage: "!resume [game-code]", description: "Explicitly resume a saved game paused after restart (GM/admin).", matches: (command) => command === "!xeno resume" || command.startsWith("!xeno resume ") },
   { name: "replay", group: "meta", usage: "!replay [page]", description: "Read the finished game's sealed timeline.", matches: (command) => command === "!xeno replay" || command.startsWith("!xeno replay ") },
   { name: "lastwords", group: "game", usage: "!lastwords <message>", description: "Your one final message, within 15 seconds of death.", matches: (command) => command === "!xeno lastwords" || command.startsWith("!xeno lastwords ") },
@@ -81,7 +82,7 @@ function commandRows(commands: readonly CommandDefinition[]): string {
 
 export function helpText(section = ""): string {
   if (!section) return [
-    HELP_HEADER, "", "*YOUR NEXT MOVE*",
+    HELP_HEADER, "", "!brief · What is Werewolf?", "", "*YOUR NEXT MOVE*",
     "!help setup · Start a game",
     "!help game · Players & status",
     "!help powers · Your role actions",
@@ -102,4 +103,16 @@ export function helpText(section = ""): string {
     return [`*${title}*`, ...(hint ? [hint] : []), "", commandRows(commands), ...(group === "game" && section !== "all" ? ["", "!help powers · Private role actions"] : [])].join("\n");
   });
   return [HELP_HEADER, "", ...blocks.flatMap((block, index) => index ? ["", "────────────────", "", block] : [block]), "", "!help · Back to the handbook"].join("\n");
+}
+
+export function briefText(): string {
+  return [
+    "✦ *LORDXENO · WEREWOLF IN A MINUTE*", "────────────────", "",
+    "A village. Secret roles. A few very convincing liars.", "",
+    "*At night*", "Werewolves pick someone to kill. Special roles use their powers privately.", "",
+    "*By day*", "Everyone discusses who looks suspicious, then votes privately to eliminate a suspect.", "",
+    "*The goal*", "Village: find and eliminate the wolves.", "Werewolves: deceive the village and take control.", "Some Neutral roles have their own win conditions.", "",
+    "Your role arrives by DM. Keep it secret, watch the clues, and trust carefully.", "",
+    "!join · Enter an open lobby", "!help · Commands & guides"
+  ].join("\n");
 }

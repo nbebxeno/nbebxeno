@@ -101,6 +101,10 @@ test("WhatsApp keeps voting private while locked, suppresses repeat joins, and c
     assert.match(sent.at(-1)!.text, /THE GATHERING/, "live notify commands must not rely on local clock agreement");
     await receive({ type: "notify", messages: [{ messageTimestamp: 1, key: { remoteJid: "live@g.us", fromMe: true }, message: { conversation: "!endgame" } }] });
     assert.match(sent.at(-1)!.text, /Game ended/, "live cancellation must work despite clock skew");
+    await receive({ messages: [{ key: { remoteJid: "intro@s.whatsapp.net" }, message: { conversation: "!explain" } }] });
+    assert.match(sent.at(-1)!.text, /WEREWOLF IN A MINUTE/);
+    await receive({ messages: [{ key: { fromMe: true, remoteJid: "intro@g.us" }, message: { conversation: "!brief" } }] });
+    assert.match(sent.at(-1)!.text, /WEREWOLF IN A MINUTE/);
     const afterOwnHelp = sent.length;
     t.mock.timers.tick(1000);
     await receive({ messages: [{ key: { fromMe: true, remoteJid: "advanced@g.us", id: "own-help" }, message: { conversation: "!help" } }] });

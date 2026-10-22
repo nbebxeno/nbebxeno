@@ -16,6 +16,9 @@ test("registry resolves aliases and parameterized commands", () => {
   assert.equal(resolveCommand("!xeno startgame")?.name, "start");
   assert.equal(resolveCommand("!xeno vote 3")?.name, "vote");
   assert.equal(resolveCommand("!xeno night 2")?.name, "night");
+  assert.equal(resolveCommand("!brief")?.name, "brief");
+  assert.equal(resolveCommand("!explain")?.name, "brief");
+  assert.equal(resolveCommand("!Xeno explain")?.name, "brief");
   assert.equal(resolveCommand("!xeno unknown"), undefined);
 });
 
