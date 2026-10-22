@@ -3,7 +3,6 @@ import test from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GameError } from "../src/engine.ts";
 import { GameSessions } from "../src/session.ts";
 
 const rules = { tieRule: "no-elimination" as const, revealRoleOnDeath: false };

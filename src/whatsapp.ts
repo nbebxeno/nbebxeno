@@ -3,66 +3,81 @@ import pino from "pino";
 import qrcodeTerminal from "qrcode-terminal";
 import * as qrcodeImage from "qrcode";
 import { GameError } from "./engine.ts";
+import { PermanentGms, canonicalIdentity, matchingParticipant, metadataIsAdmin } from "./access.ts";
 import { GameSessions } from "./session.ts";
+import { discussionStory, nightStory, votingStory, dawnStory, verdictStory } from "./narration.ts";
+import { replayCard, replayHighlights } from "./replay.ts";
+import { leaderboardPng, leaderboardName } from "./leaderboard-image.ts";
 import { StatsStore } from "./stats.ts";
-import { helpText, resolveCommand } from "./commands.ts";
+import { briefText, helpText, resolveCommand, normalizeCommand } from "./commands.ts";
+import { roleCard, lobbyCard, rosterCard, statusCard, rolesCard, roleLabel, deceasedLabel, victoryCard, votingCard, phaseBanner } from "./presentation.ts";
 
 const authDirectory = "./.auth/lordxeno";
 const qrImagePath = `${authDirectory}/whatsapp-qr.png`;
-const sessions = new GameSessions({ tieRule: "no-elimination", revealRoleOnDeath: false }, "./.data/lordxeno-games.json");
+const sessions = new GameSessions({ tieRule: "no-elimination", revealRoleOnDeath: true }, "./.data/lordxeno-games.json");
+// Cold starts must never advance an old saved game without a manager's decision.
+const startupPaused = new Set(sessions.resumableGames().map((game) => game.groupId));
+const processStartedAt = Date.now();
+const debugInbound = process.env.LORDXENO_DEBUG === "1";
+const debugLastPrinted = new Map<string, number>();
+function inboundLog(message: string): void {
+  if (!debugInbound) return;
+  // Repeated history events must not flood the terminal.
+  const now = Date.now();
+  if (now - (debugLastPrinted.get(message) ?? -Infinity) < 10_000) return;
+  debugLastPrinted.set(message, now);
+  console.log(`[inbound] ${message}`);
+}
+const seenMessages = new Set<string>();
+const phaseTransitions = new Set<string>();
 const phaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const phaseDeadlines = new Map<string, number>();
+const duplicateJoinWarnings = new Set<string>();
 const commandCooldowns = new Map<string, number>();
+const packCooldowns = new Map<string, number>();
 const stats = new StatsStore();
+const permanentGms = new PermanentGms();
 let activeSocket: ReturnType<typeof makeWASocket> | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-function messageText(message: { conversation?: string | null; extendedTextMessage?: { text?: string | null } | null }): string {
-  return message.conversation ?? message.extendedTextMessage?.text ?? "";
+interface TextMessage {
+  conversation?: string | null;
+  extendedTextMessage?: { text?: string | null } | null;
+  ephemeralMessage?: { message?: TextMessage | null } | null;
+  viewOnceMessage?: { message?: TextMessage | null } | null;
+  viewOnceMessageV2?: { message?: TextMessage | null } | null;
 }
-
-function roleMessage(view: ReturnType<GameSessions["startGame"]>["privateViews"][number]): string {
-  return [
-    "🌑 LORDXENO — SECRET ROLE",
-    "",
-    `Role: ${view.role}`,
-    `Faction: ${view.faction}`,
-    "",
-    view.roleDefinition.description,
-    view.roleDefinition.activeAbility ? `Ability: ${view.roleDefinition.activeAbility}` : "No active night ability is currently defined.",
-    `Win condition: ${view.roleDefinition.winCondition}`,
-    "",
-    "Keep this message private. The game begins in the group."
-  ].join("\n");
+function messageText(message: TextMessage): string {
+  let current = message;
+  for (let depth = 0; depth < 5; depth++) {
+    const text = current.conversation ?? current.extendedTextMessage?.text;
+    if (text != null) return text;
+    const nested = current.ephemeralMessage?.message ?? current.viewOnceMessage?.message ?? current.viewOnceMessageV2?.message;
+    if (!nested) break;
+    current = nested;
+  }
+  return "";
 }
 
 function lobbyMessage(snapshot: ReturnType<GameSessions["snapshot"]>): string {
-  const players = snapshot.players.map((player, index) => `${index + 1}. ${player.displayName}`).join("\n");
-  return `🌒 XENOVERSE LOBBY\n\nPlayers (${snapshot.players.length}/4 minimum):\n${players}\n\nThe host must choose a mode with !xeno mode classic, !xeno mode beginner, or !xeno mode chaos before starting.`;
+  return lobbyCard(snapshot, sessions.mode(snapshot.groupId));
 }
 
 function rosterMessage(groupId: string): string {
-  const view = sessions.gameSnapshot(groupId);
-  const alive = sessions.numberedAlivePlayers(groupId).map((entry) => `${entry.number}. ${entry.player.displayName}`).join("\n");
-  const eliminated = view.players.filter((player) => !player.alive).map((player) => `- ${player.displayName} (eliminated)`).join("\n");
-  return `🌒 XENOVERSE ROSTER\n\n${alive || "No living players."}${eliminated ? `\n\n${eliminated}` : ""}`;
+  return rosterCard(sessions.gameSnapshot(groupId));
 }
 
-function nightPrompt(role: string): string {
-  if (role === "werewolf") return "🌑 NIGHT ACTION\n\nChoose a living player to target. Reply with !xeno night <player number>.";
-  if (role === "seer") return "🔮 NIGHT ACTION\n\nChoose a living player to investigate. Reply with !xeno night <player number>.";
-  if (role === "doctor") return "🩺 NIGHT ACTION\n\nChoose a living player to protect. Reply with !xeno night <player number>.";
-  return "🌑 NIGHT\n\nYou have no defined night action. Remain silent until dawn.";
+function isActiveGame(groupId: string): boolean {
+  try { return !startupPaused.has(groupId) && sessions.gameSnapshot(groupId).status === "active"; }
+  catch { return false; }
 }
 
 function schedulePhaseTimer(groupId: string, milliseconds: number, callback: () => void, nextPhase?: "night" | "voting"): void {
+  if (!isActiveGame(groupId)) return;
   const previous = phaseTimers.get(groupId);
   if (previous) clearTimeout(previous);
-  phaseDeadlines.set(groupId, Date.now() + milliseconds);
   sessions.setPhaseDeadline(groupId, Date.now() + milliseconds, nextPhase);
   phaseTimers.set(groupId, setTimeout(() => {
     phaseTimers.delete(groupId);
-    phaseDeadlines.delete(groupId);
     callback();
   }, milliseconds));
 }
@@ -71,7 +86,6 @@ function clearPhaseTimer(groupId: string): void {
   const timer = phaseTimers.get(groupId);
   if (timer) clearTimeout(timer);
   phaseTimers.delete(groupId);
-  phaseDeadlines.delete(groupId);
   try { sessions.setPhaseDeadline(groupId, undefined); } catch { /* session may already be gone */ }
 }
 
@@ -80,28 +94,68 @@ function logPhaseTransition(groupId: string, phase: string, trigger: string): vo
 }
 
 function remainingSeconds(groupId: string): number | null {
-  const deadline = phaseDeadlines.get(groupId);
+  const deadline = sessions.phaseDeadline(groupId);
   return deadline ? Math.max(0, Math.ceil((deadline - Date.now()) / 1000)) : null;
 }
 
 function recordCompletedGame(groupId: string): void {
   const result = sessions.completedRecord(groupId);
   if (!result) return;
-  for (const player of result.players) stats.record(player.id, player.role, player.faction === result.winner, player.lynched, player.alive);
+  for (const player of result.players) stats.record(player.id, player.role, (result.winner !== "neutral" && player.faction === result.winner) || result.individualWinners.includes(player.id), player.lynched, player.alive, player.displayName);
   stats.addChronicle(`${new Date().toISOString().slice(0, 10)}: ${result.winner} victory in ${groupId}; ${result.players.length} players summoned.`);
 }
 
-async function isGroupAdmin(socket: ReturnType<typeof makeWASocket>, groupId: string, identity: string): Promise<boolean> {
+async function managerAccess(socket: ReturnType<typeof makeWASocket>, groupId: string | undefined, identities: Array<string | null | undefined>, fromMe = false): Promise<"gm" | "admin" | null> {
+  if (fromMe) return "gm"; // This flag is supplied by the linked WhatsApp session.
+  if (permanentGms.has(identities)) return "gm";
+  const resolved = [...identities];
+  for (const identity of identities) {
+    const canonical = canonicalIdentity(identity);
+    if (!canonical) continue;
+    try {
+      const mappings = socket.signalRepository?.lidMapping;
+      const alternate = canonical.endsWith("@lid") ? await mappings?.getPNForLID(canonical) : await mappings?.getLIDForPN(canonical);
+      if (alternate) resolved.push(alternate);
+    } catch { /* Metadata may still provide the verified alternate identity. */ }
+  }
+  if (permanentGms.has(resolved)) return "gm";
+  if (!groupId) {
+    // Some private messages contain only a LID. Resolve it through verified
+    // membership metadata when the session's LID cache is not populated yet.
+    if (resolved.some((identity) => canonicalIdentity(identity)?.endsWith("@lid"))) {
+      for (const game of sessions.manageableGames()) {
+        try {
+          const metadata = await socket.groupMetadata(game.groupId);
+          const participant = matchingParticipant(metadata, resolved);
+          if (participant && permanentGms.has([participant.id, participant.phoneNumber, participant.lid])) return "gm";
+        } catch { /* One unavailable group must not block the remaining checks. */ }
+      }
+    }
+    return null;
+  }
   const metadata = await socket.groupMetadata(groupId);
-  const normalizedIdentity = identity.split("@")[0].replace(/\D/g, "");
-  return metadata.participants.some((participant) => {
-    const normalizedParticipant = participant.id.split("@")[0].replace(/\D/g, "");
-    return (participant.id === identity || normalizedParticipant === normalizedIdentity) && (participant.admin === "admin" || participant.admin === "superadmin");
-  });
+  const participant = matchingParticipant(metadata, resolved);
+  if (participant && permanentGms.has([participant.id, participant.phoneNumber, participant.lid])) return "gm";
+  return metadataIsAdmin(metadata, resolved) ? "admin" : null;
 }
 
-function participantIdentity(message: { key: { participant?: string | null; participantPn?: string | null; remoteJid?: string | null } }): string {
-  return message.key.participantPn ?? message.key.participant ?? message.key.remoteJid ?? "";
+function participantIdentity(message: { key: { participant?: string | null; participantPn?: string | null; participantAlt?: string | null; remoteJid?: string | null } }): string {
+  const candidates = [message.key.participantPn, message.key.participantAlt, message.key.participant];
+  return candidates.find((id) => id?.endsWith("@s.whatsapp.net")) ?? message.key.participant ?? message.key.remoteJid ?? "";
+}
+
+function locatePrivateGame(jid: string, alternate?: string | null, allowPaused = false): string {
+  const check = (groupId: string) => {
+    if (!allowPaused && startupPaused.has(groupId)) throw new GameError("This saved game is paused after restart. A GM/admin must use !resume or !endgame in the group.");
+    return groupId;
+  };
+  try { return check(sessions.groupForIdentity(jid)); }
+  catch (error) {
+    if (!alternate || !(error instanceof GameError) || !error.message.startsWith("Unknown player")) throw error;
+    const groupId = sessions.groupForIdentity(alternate);
+    sessions.registerAlias(groupId, sessions.resolvePlayerId(groupId, alternate), jid);
+    return check(groupId);
+  }
 }
 
 async function safeSend(socket: ReturnType<typeof makeWASocket>, jid: string, text: string): Promise<void> {
@@ -112,6 +166,7 @@ async function safeSend(socket: ReturnType<typeof makeWASocket>, jid: string, te
   }
   try {
     await socket.sendMessage(jid, { text });
+    inboundLog("reply sent");
   } catch (error) {
     console.error("WhatsApp message was not sent:", error instanceof Error ? error.message : error);
   }
@@ -122,7 +177,7 @@ async function startWhatsApp(): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState(authDirectory);
   const socket = makeWASocket({
     auth: state,
-    logger: pino({ level: "silent" }),
+    logger: pino({ level: debugInbound ? "warn" : "silent" }),
     printQRInTerminal: false
   });
   activeSocket = socket;
@@ -142,6 +197,9 @@ async function startWhatsApp(): Promise<void> {
     if (connection === "close") {
       if (activeSocket !== socket) return;
       activeSocket = null;
+      // Preserve deadlines, but do not advance phases while disconnected.
+      for (const timer of phaseTimers.values()) clearTimeout(timer);
+      phaseTimers.clear();
       const statusCode = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode;
       if (statusCode !== DisconnectReason.loggedOut) {
         if (!reconnectTimer) {
@@ -157,139 +215,295 @@ async function startWhatsApp(): Promise<void> {
     }
   });
 
-  socket.ev.on("messages.upsert", async ({ messages }) => {
+  socket.ev.on("messages.upsert", async ({ messages, type }) => {
+    if (activeSocket !== socket) return;
+
+    // Baileys may deliver live companion-device messages as append. Timestamp
+    // freshness, not the batch label, distinguishes these from old history.
+
     for (const message of messages) {
-      if (message.key.fromMe || !message.message || !message.key.remoteJid) continue;
+      if (!message.message || !message.key.remoteJid) {
+        inboundLog(`skip=missing-body-or-destination stub=${message.messageStubType ?? "none"}`);
+        continue;
+      }
       const remoteJid = message.key.remoteJid;
       const text = messageText(message.message).trim();
-      const command = text.toLowerCase();
+      const command = normalizeCommand(text);
       const commandName = resolveCommand(command)?.name;
+      // Ordinary messages and history are irrelevant to command diagnostics.
+      if (!commandName) continue;
+      const timestamp = Number(message.messageTimestamp);
+      const hasTimestamp = Number.isFinite(timestamp) && timestamp > 0;
+      const olderThanStartup = hasTimestamp && timestamp * 1000 < processStartedAt - 3_000;
+      const recoveryRead = ["ping", "help", "brief", "gm", "games", "status", "players"].includes(commandName);
+      const historicalDelivery = type !== "notify" && ((type === "append" && !hasTimestamp) || olderThanStartup);
+      const recoveryEnd = commandName === "endgame" && (startupPaused.has(remoteJid) || !remoteJid.endsWith("@g.us"));
+      // notify is Baileys' live-delivery signal. Do not reject live commands
+      // by comparing WhatsApp's clock with an Android device's local clock.
+      // Recovery reads never mutate a game and must work with missing/old timestamps.
+      if (!recoveryRead && !recoveryEnd && historicalDelivery) {
+        inboundLog(`skip=old-history-command command=${commandName}`);
+        continue;
+      }
+      const messageId = message.key.id ? `${remoteJid}:${message.key.participant ?? ""}:${message.key.fromMe ? "own" : "peer"}:${message.key.id}` : undefined;
+      if (messageId) {
+        if (seenMessages.has(messageId)) { inboundLog("skip=duplicate-id"); continue; }
+        seenMessages.add(messageId);
+        if (seenMessages.size > 5_000) seenMessages.delete(seenMessages.values().next().value!);
+      }
+      if (message.key.fromMe && !["endgame", "resume", "kick", "gm", "games", "help", "brief", "ping", "status", "players"].includes(commandName)) { inboundLog(`skip=own-gameplay-command command=${commandName}`); continue; }
+      inboundLog(`command=${commandName} own=${Boolean(message.key.fromMe)} scope=${remoteJid.endsWith("@g.us") ? "group" : "dm"}`);
       const commandKey = `${message.key.remoteJid}:${participantIdentity(message)}:${command}`;
       const lastCommand = commandCooldowns.get(commandKey) ?? 0;
-      if (Date.now() - lastCommand < 750) continue;
+      if (Date.now() - lastCommand < 750) { inboundLog("skip=cooldown"); continue; }
       commandCooldowns.set(commandKey, Date.now());
       if (commandName === "ping") {
         await safeSend(socket, message.key.remoteJid, "lordxeno transport online.");
         continue;
       }
-      if (commandName === "help") {
-        await safeSend(socket, message.key.remoteJid, helpText());
+      if (commandName === "brief") {
+        await safeSend(socket, remoteJid, briefText());
         continue;
       }
-      const senderId = message.key.participant ?? message.key.remoteJid;
-      const groupIdentity = participantIdentity(message);
+      if (commandName === "help") {
+        await safeSend(socket, message.key.remoteJid, helpText(command.slice("!xeno help".length).trim()));
+        continue;
+      }
+      const participantAlias = message.key.participant === participantIdentity(message) ? message.key.participantAlt : message.key.participant;
+      const joinWarningKey = `${remoteJid}:${participantIdentity(message)}`;
+      const groupIdentity = message.key.fromMe ? socket.user?.id ?? participantIdentity(message) : participantIdentity(message);
+      const senderIdentities = [groupIdentity, message.key.participant, message.key.participantAlt, (message.key as { participantPn?: string }).participantPn];
       const sender = { id: groupIdentity, displayName: message.pushName ?? groupIdentity };
       try {
+        if (commandName === "pack") {
+          if (remoteJid.endsWith("@g.us")) throw new GameError("Pack whispers belong in DM. Send !pack <message> privately to the bot.");
+          const groupId = locatePrivateGame(remoteJid, message.key.remoteJidAlt);
+          const words = text.replace(/^!(?:xeno\s+)?pack(?:\s+|$)/i, "");
+          const relay = sessions.packMessage(groupId, remoteJid, words);
+          const key = `${groupId}:${relay.senderId}`;
+          const sentAt = packCooldowns.get(key);
+          if (sentAt !== undefined && Date.now() - sentAt < 2_000) throw new GameError("Give the pack a second. One whisper every 2 seconds.");
+          packCooldowns.set(key, Date.now());
+          let delivered = 0;
+          for (const recipient of relay.recipients) {
+            try { await socket.sendMessage(recipient, { text: relay.text }); delivered++; }
+            catch { console.error("A pack whisper could not be sent to one recipient."); }
+          }
+          if (!delivered) packCooldowns.delete(key);
+          await safeSend(socket, remoteJid, delivered ? `Whisper sent to ${delivered} packmate${delivered === 1 ? "" : "s"}.${delivered < relay.recipients.length ? " Some deliveries failed; try again shortly." : ""}` : "The whisper could not be sent. Try again shortly.");
+          continue;
+        }
+        if (commandName === "lastwords") {
+          if (remoteJid.endsWith("@g.us")) throw new GameError("Send your last words in DM: !lastwords <message>.");
+          let identity = remoteJid, groupId: string;
+          try { groupId = sessions.lastWordsGroup(identity); }
+          catch (error) { if (!message.key.remoteJidAlt) throw error; identity = message.key.remoteJidAlt; groupId = sessions.lastWordsGroup(identity); }
+          const words = text.replace(/^!(?:xeno\s+)?lastwords\s*/i, "");
+          for (const event of sessions.lastWords(groupId, identity, words)) await safeSend(socket, event.recipient ?? groupId, event.text);
+          await safeSend(socket, remoteJid, "Your last words have reached the square. Rest dramatically.");
+          continue;
+        }
+        if (!remoteJid.endsWith("@g.us") && ["gm", "games", "endgame", "resume"].includes(commandName)) {
+          const privateIdentities = [remoteJid, message.key.remoteJidAlt];
+          const permanent = await managerAccess(socket, undefined, privateIdentities, message.key.fromMe ?? false) === "gm";
+          const games = sessions.manageableGames();
+          if (commandName === "gm") {
+            await safeSend(socket, remoteJid, permanent ? "🎮 Permanent Game Master access: yes. Use !games or !endgame here in DM." : "Permanent Game Master access: no. Configure your number locally with the gm setup command.");
+          } else if (commandName === "games") {
+            if (!permanent) throw new GameError("Only a permanent Game Master can list all games.");
+            await safeSend(socket, remoteJid, games.length ? ["🎮 *GM · ACTIVE GAMES*", "", ...games.map((game) => `${game.host}'s game · ${startupPaused.has(game.groupId) ? "PAUSED / " : ""}${game.phase} · ${game.players} players\n!endgame ${game.code} · !resume ${game.code}`)].join("\n") : "No active games or lobbies.");
+          } else {
+            const code = command.slice(`!xeno ${commandName}`.length).trim();
+            let target = code ? games.find((game) => game.code === code) : undefined;
+            if (!code) {
+              try { const groupId = locatePrivateGame(remoteJid, message.key.remoteJidAlt, true); target = games.find((game) => game.groupId === groupId); }
+              catch { if (permanent && games.length === 1) target = games[0]; }
+            }
+            if (!target) throw new GameError(permanent ? "Use !games, then !endgame <game-code> or !resume <game-code> to choose a saved game." : "Send !endgame in your group or specify its game code.");
+            if (!permanent && !await managerAccess(socket, target.groupId, privateIdentities, message.key.fromMe ?? false)) throw new GameError("Only a group admin or permanent Game Master can end this game.");
+            if (commandName === "endgame" && historicalDelivery && !startupPaused.has(target.groupId)) throw new GameError("This cancellation arrived as old history. Send a fresh !endgame in the group, or correct Android's automatic date/time and retry.");
+            if (commandName === "resume") {
+              await resumeGame(socket, target.groupId);
+              await safeSend(socket, remoteJid, "Game resumed. The group has been notified.");
+            } else {
+              await stopGame(socket, target.groupId, message.pushName ?? "Game Master");
+              await safeSend(socket, remoteJid, "🛑 Game ended. The group has been notified.");
+            }
+          }
+          continue;
+        }
+        if (!remoteJid.endsWith("@g.us") && ["actions", "act", "skip", "myrole", "details"].includes(commandName)) {
+          const actionGroupId = locatePrivateGame(remoteJid, message.key.remoteJidAlt);
+          if (commandName === "actions") {
+            await safeSend(socket, remoteJid, sessions.actionPrompt(actionGroupId, remoteJid));
+          } else if (["myrole", "details"].includes(commandName)) {
+            await safeSend(socket, remoteJid, roleCard(sessions.privateView(actionGroupId, sessions.resolvePlayerId(actionGroupId, remoteJid)), commandName === "details"));
+          } else {
+            const previousPhase = sessions.gameSnapshot(actionGroupId).phase;
+            if (commandName === "skip") sessions.skipAction(actionGroupId, remoteJid);
+            else {
+              const [ability, ...args] = command.slice("!xeno act ".length).split(" ");
+              sessions.submitRoleAction(actionGroupId, remoteJid, ability, args);
+            }
+            await safeSend(socket, remoteJid, commandName === "skip" ? "Remaining abilities skipped for this phase. Your vote is separate." : "✅ Your ability has been recorded.");
+            await flushEvents(socket, actionGroupId);
+            const phase = sessions.gameSnapshot(actionGroupId).phase;
+            if (!phaseTransitions.has(actionGroupId)) {
+              if (previousPhase === "reaction") await continueGame(socket, actionGroupId);
+              else if (phase === "night" && sessions.allNightActionsSubmitted(actionGroupId)) await resolveNightPhase(socket, actionGroupId, false);
+              else if (phase === "voting" && sessions.allVotesSubmitted(actionGroupId)) await resolveVotePhase(socket, actionGroupId, "all-votes-submitted");
+              else if (commandName === "act" || commandName === "skip") {
+                if (phase === "reaction") await enterReaction(socket, actionGroupId);
+                else if (phase === "ended" || (phase !== "night" && phase !== "voting")) await continueGame(socket, actionGroupId);
+              }
+            }
+          }
+          continue;
+        }
         if (!message.key.remoteJid.endsWith("@g.us") && commandName === "night") {
           const targetNumber = Number(command.slice("!xeno night ".length).trim());
-          if (!Number.isInteger(targetNumber)) throw new GameError("Choose a player number, for example: !xeno night 2");
-          sessions.submitNightAction(sessions.groupForIdentity(message.key.remoteJid), message.key.remoteJid, targetNumber);
+          if (!Number.isInteger(targetNumber)) throw new GameError("Choose a player number, for example: !night 2");
+          sessions.submitNightAction(locatePrivateGame(remoteJid, message.key.remoteJidAlt), message.key.remoteJid, targetNumber);
           await safeSend(socket, message.key.remoteJid, "Your night action has been recorded. Await dawn.");
-          const actionGroupId = sessions.groupForIdentity(message.key.remoteJid);
-          if (sessions.allNightActionsSubmitted(actionGroupId)) void resolveNightPhase(socket, actionGroupId, false);
+          const actionGroupId = locatePrivateGame(remoteJid, message.key.remoteJidAlt);
+          if (!phaseTransitions.has(actionGroupId) && sessions.allNightActionsSubmitted(actionGroupId)) await resolveNightPhase(socket, actionGroupId, false);
           continue;
         }
         if (!message.key.remoteJid.endsWith("@g.us") && commandName === "vote") {
           const targetNumber = Number(command.slice("!xeno vote ".length).trim());
-          if (!Number.isInteger(targetNumber)) throw new GameError("Vote with a player number, for example: !xeno vote 2");
-          const voteGroupId = sessions.groupForIdentity(message.key.remoteJid);
+          if (!Number.isInteger(targetNumber)) throw new GameError("Vote with a player number, for example: !vote 2");
+          const voteGroupId = locatePrivateGame(remoteJid, message.key.remoteJidAlt);
           sessions.submitVote(voteGroupId, message.key.remoteJid, targetNumber);
           await safeSend(socket, message.key.remoteJid, "✅ Your vote has been recorded. Await the result.");
-          if (sessions.allVotesSubmitted(voteGroupId)) void resolveVotePhase(socket, voteGroupId, "all-votes-submitted");
+          if (!phaseTransitions.has(voteGroupId) && sessions.allVotesSubmitted(voteGroupId)) await resolveVotePhase(socket, voteGroupId, "all-votes-submitted");
           continue;
         }
         if (!message.key.remoteJid.endsWith("@g.us") && commandName === "unvote") {
-          const voteGroupId = sessions.groupForIdentity(message.key.remoteJid);
+          const voteGroupId = locatePrivateGame(remoteJid, message.key.remoteJidAlt);
           sessions.unvote(voteGroupId, message.key.remoteJid);
           await safeSend(socket, message.key.remoteJid, "✅ Your vote has been retracted.");
           continue;
         }
         if (!message.key.remoteJid.endsWith("@g.us") || !command.startsWith("!xeno ")) continue;
-        if (commandName === "lobby") {
+        if (startupPaused.has(remoteJid) && ["lobby", "start", "mode", "join", "leave", "night", "night-resolve", "resolve", "act", "skip"].includes(commandName)) {
+          throw new GameError("This saved game is paused after restart. Use !endgame to cancel, or !resume to continue (GM/admin).");
+        }
+        if (commandName === "resume") {
+          if (!await managerAccess(socket, remoteJid, senderIdentities, message.key.fromMe ?? false)) throw new GameError("Only a group admin or permanent Game Master can resume a game.");
+          if (command !== "!xeno resume") throw new GameError("In a group, use !resume without a code.");
+          await resumeGame(socket, remoteJid);
+        } else if (commandName === "games") {
+          throw new GameError("Use !games in DM for private Game Master control.");
+        } else if (commandName === "gm") {
+          const access = await managerAccess(socket, remoteJid, senderIdentities, message.key.fromMe ?? false);
+          await safeSend(socket, remoteJid, access === "gm" ? "🎮 Permanent Game Master access: yes. You can use !endgame and !kick without being a group admin." : access === "admin" ? "You have group-admin access. Permanent Game Master access: no." : "You do not have Game Master or group-admin access.");
+        } else if (commandName === "lobby") {
+          const lobby = sessions.createLobby(remoteJid, sender);
           clearPhaseTimer(remoteJid);
-          await safeSend(socket, message.key.remoteJid, `${lobbyMessage(sessions.createLobby(message.key.remoteJid, sender))}\n\nThe lobby is waiting for the host's mode selection.`);
-          sessions.registerAlias(message.key.remoteJid, groupIdentity, message.key.remoteJid);
+          await safeSend(socket, remoteJid, lobbyMessage(lobby));
+          stats.rememberName(sender.id, sender.displayName);
+          if (participantAlias && participantAlias !== groupIdentity) sessions.registerAlias(remoteJid, groupIdentity, participantAlias);
         } else if (commandName === "mode") {
           const mode = command.slice("!xeno mode ".length).trim();
           if (mode !== "classic" && mode !== "beginner" && mode !== "chaos") throw new GameError("Choose classic, beginner, or chaos.");
           sessions.setMode(remoteJid, groupIdentity, mode);
-          await safeSend(socket, remoteJid, `🎭 Game mode set to ${mode}. Players may now join the lobby.`);
+          await safeSend(socket, remoteJid, lobbyMessage(sessions.snapshot(remoteJid)));
         } else if (commandName === "join") {
           if (!sessions.mode(remoteJid)) throw new GameError("The host must choose a game mode before players join.");
-          await safeSend(socket, message.key.remoteJid, lobbyMessage(sessions.joinLobby(message.key.remoteJid, sender)));
-          sessions.registerAlias(message.key.remoteJid, groupIdentity, message.key.remoteJid);
+          const lobby = sessions.joinLobby(remoteJid, sender);
+          stats.rememberName(sender.id, sender.displayName);
+          duplicateJoinWarnings.delete(joinWarningKey);
+          await safeSend(socket, remoteJid, lobbyMessage(lobby));
+          if (participantAlias && participantAlias !== groupIdentity) sessions.registerAlias(remoteJid, groupIdentity, participantAlias);
         } else if (commandName === "leave") {
           sessions.leaveLobby(message.key.remoteJid, groupIdentity);
+          duplicateJoinWarnings.delete(joinWarningKey);
           await safeSend(socket, message.key.remoteJid, `${sender.displayName} left the lobby.`);
         } else if (commandName === "players") {
           const lobby = sessions.snapshot(message.key.remoteJid);
           await safeSend(socket, message.key.remoteJid, lobby.started ? rosterMessage(message.key.remoteJid) : lobbyMessage(lobby));
         } else if (commandName === "start") {
           const started = sessions.startGame(message.key.remoteJid, groupIdentity);
-          await safeSend(socket, message.key.remoteJid, "🌘 THE SUMMONING BEGINS\n\nThe players have been gathered. Check your private messages. The first discussion begins now. You have 60 seconds.");
-          for (const view of started.privateViews) await safeSend(socket, view.player.id, roleMessage(view));
-          void enterPhase(socket, remoteJid, "discussion", "The first discussion begins. You have 60 seconds.", "night");
+          await safeSend(socket, message.key.remoteJid, "🌘 *LORDXENO · THE SUMMONING*\n\nYour secret role is arriving by private message. Keep it to yourself.");
+          for (const view of started.privateViews) await safeSend(socket, view.player.id, roleCard(view));
+          void enterPhase(socket, remoteJid, "discussion", phaseBanner("DAY 1 / THE SQUARE", "Discussion · 2 minutes", discussionStory(1, `${remoteJid}:${sessions.gameSnapshot(remoteJid).startedAt}`)), "night");
         } else if (commandName === "status") {
+          const lobby = sessions.snapshot(remoteJid);
+          if (!lobby.started) {
+            await safeSend(socket, remoteJid, lobbyMessage(lobby));
+            continue;
+          }
           const view = sessions.gameSnapshot(remoteJid);
           const seconds = remainingSeconds(remoteJid);
-          await safeSend(socket, remoteJid, `📜 STATUS\n\nPhase: ${view.phase}\nTime remaining: ${seconds === null ? "not timed" : `${seconds}s`}\nAlive: ${view.players.filter((player) => player.alive).length}/${view.players.length}`);
+          await safeSend(socket, remoteJid, `${startupPaused.has(remoteJid) ? "*PAUSED AFTER RESTART* · !endgame or !resume\n\n" : ""}${statusCard(view, startupPaused.has(remoteJid) ? null : seconds)}`);
         } else if (commandName === "roles") {
-          const roles = sessions.roleSummaries(remoteJid).map((role) => `• ${role.name}: ${role.description}`).join("\n");
-          await safeSend(socket, remoteJid, `🎭 ROLES IN THIS GAME\n\n${roles}`);
-        } else if (commandName === "myrole") {
+          await safeSend(socket, remoteJid, rolesCard(sessions.roleSummaries(remoteJid)));
+        } else if (["myrole", "details"].includes(commandName)) {
           const view = sessions.privateView(remoteJid, groupIdentity);
-          await safeSend(socket, groupIdentity, roleMessage(view));
+          await safeSend(socket, groupIdentity, roleCard(view, commandName === "details"));
           await safeSend(socket, remoteJid, `${sender.displayName}, your role reminder was sent privately.`);
         } else if (commandName === "graveyard") {
           const deaths = sessions.graveyard(remoteJid);
           const view = sessions.gameSnapshot(remoteJid);
           const message = deaths.length === 0 ? "The graveyard is empty." : deaths.map((death) => {
-            const player = view.players.find((candidate) => candidate.id === death.playerId);
-            return `• ${player?.displayName ?? death.playerId} (${death.cause})`;
+            return `• ${deceasedLabel(view, death.playerId)} (${death.cause === "undefined" ? "Unknown cause" : roleLabel(death.cause)})`;
           }).join("\n");
-          await safeSend(socket, remoteJid, `🪦 GRAVEYARD\n\n${message}`);
+          await safeSend(socket, remoteJid, `🪦 *LORDXENO · GRAVEYARD*\n\n${message}`);
+        } else if (["act", "actions", "skip"].includes(commandName)) {
+          await safeSend(socket, groupIdentity, sessions.actionPrompt(remoteJid, groupIdentity));
+          await safeSend(socket, remoteJid, "Your abilities were sent privately. Use powers and !skip in DM.");
         } else if (commandName === "vote") {
           throw new GameError("Voting happens privately. Check your DM from lordxeno.");
         } else if (commandName === "unvote") {
-          sessions.unvote(remoteJid, groupIdentity);
-          await safeSend(socket, remoteJid, `${sender.displayName}'s vote was retracted.`);
+          throw new GameError("Retract your vote privately with !unvote in DM.");
         } else if (commandName === "votes") {
           const tally = sessions.voteSnapshot(remoteJid);
           const view = sessions.gameSnapshot(remoteJid);
           const lines = Object.entries(tally.counts).map(([targetId, count]) => `${view.players.find((player) => player.id === targetId)?.displayName ?? targetId}: ${count}`);
           await safeSend(socket, remoteJid, `🗳️ VOTES\n\n${lines.length ? lines.join("\n") : "No votes yet."}`);
         } else if (commandName === "resolve") {
-          clearPhaseTimer(remoteJid);
           await resolveVotePhase(socket, remoteJid, "manual");
         } else if (commandName === "night-resolve") {
           await resolveNightPhase(socket, remoteJid, false);
         } else if (commandName === "stats") {
           const current = stats.get(groupIdentity);
           const favorite = Object.entries(current.roles).sort((left, right) => right[1] - left[1])[0]?.[0] ?? "none";
-          await safeSend(socket, remoteJid, `📊 STATS\n\nGames: ${current.games}\nWins: ${current.wins}\nWin rate: ${current.games ? Math.round(current.wins / current.games * 100) : 0}%\nLynched: ${current.lynched}\nSurvived to end: ${current.survived}\nMost played role: ${favorite}`);
+          await safeSend(socket, remoteJid, `📊 STATS\n\nGames: ${current.games}\nWins: ${current.wins}\nWin rate: ${current.games ? Math.round(current.wins / current.games * 100) : 0}%\nLynched: ${current.lynched}\nSurvived to end: ${current.survived}\nMost played role: ${favorite === "none" ? "None yet" : roleLabel(favorite)}`);
         } else if (commandName === "chronicle") {
           await safeSend(socket, remoteJid, `📖 VILLAGE CHRONICLE\n\n${stats.chronicle().join("\n") || "No legends have been recorded yet."}`);
+        } else if (commandName === "replay") {
+          const page = command.slice("!xeno replay".length).trim();
+          await safeSend(socket, remoteJid, replayCard(sessions.replay(remoteJid), page ? Number(page) : 1));
         } else if (commandName === "leaderboard") {
-          const entries = stats.leaderboard().map((entry, index) => `${index + 1}. ${entry.id} - ${entry.wins} wins`).join("\n");
-          await safeSend(socket, remoteJid, `🏆 LEADERBOARD\n\n${entries || "No players have completed a recorded game yet."}`);
+          const top = stats.leaderboard();
+          try {
+            await socket.sendMessage(remoteJid, { image: await leaderboardPng(top), caption: "LORDXENO / HALL OF FAME\nThe village remembers its legends. · !stats" });
+          } catch {
+            const entries = top.map((entry, i) => `${i + 1}. ${leaderboardName(entry, i + 1)} · ${entry.wins} wins · ${entry.games} games`).join("\n");
+            await safeSend(socket, remoteJid, `*LORDXENO / HALL OF FAME*\n────────────────\n${entries || "No legends yet. Finish a game to claim your place."}`);
+          }
         } else if (commandName === "kick") {
-          if (!await isGroupAdmin(socket, remoteJid, groupIdentity)) throw new GameError("Only a group admin can kick players.");
+          if (!await managerAccess(socket, remoteJid, senderIdentities, message.key.fromMe ?? false)) throw new GameError("Only a group admin or permanent Game Master can kick players.");
           const targetNumber = Number(command.slice("!xeno kick ".length).trim());
           if (!Number.isInteger(targetNumber)) throw new GameError("Kick a lobby player by number.");
           const lobby = sessions.snapshot(remoteJid);
           const target = lobby.players[targetNumber - 1];
           if (!target) throw new GameError("That lobby player number does not exist.");
-          sessions.kick(remoteJid, groupIdentity, target.id);
+          sessions.kick(remoteJid, groupIdentity, target.id, true);
           await safeSend(socket, remoteJid, `${target.displayName} was removed from the lobby.`);
         } else if (commandName === "endgame") {
-          if (!await isGroupAdmin(socket, remoteJid, groupIdentity)) throw new GameError("Only a group admin can end the game.");
-          clearPhaseTimer(remoteJid);
-          sessions.endGame(remoteJid);
-          await safeSend(socket, remoteJid, "⚠️ This game has been force-ended by an admin.");
+          if (!await managerAccess(socket, remoteJid, senderIdentities, message.key.fromMe ?? false)) throw new GameError("Only a group admin or permanent Game Master can end the game. Use !gm to check your access.");
+          if (command !== "!xeno endgame") throw new GameError("In a group, use !endgame without a code. Use game codes only in DM.");
+          await stopGame(socket, remoteJid, sender.displayName);
         } else if (commandName === "settings") {
-          await safeSend(socket, remoteJid, `⚙️ SETTINGS\n\nEnabled roles: ${sessions.settings(remoteJid).join(", ")}\n\nRole toggles are reserved for the role-composition pass.`);
+          await safeSend(socket, remoteJid, `⚙️ *LORDXENO · SETTINGS*\n\nMode: ${roleLabel(sessions.mode(remoteJid) ?? "classic")}\nDefault roles: ${sessions.settings(remoteJid).map(roleLabel).join(", ")}\n\nThe selected mode chooses the role pool. Custom role selection is not available yet.`);
         }
       } catch (error) {
+        if (commandName === "join" && error instanceof GameError && error.message === "You're already in the lobby.") {
+          if (duplicateJoinWarnings.has(joinWarningKey)) continue;
+          duplicateJoinWarnings.add(joinWarningKey);
+        }
+        if (!(error instanceof GameError)) console.error(`Command ${commandName} failed:`, error);
         const response = error instanceof GameError ? error.message : "The command could not be completed.";
         await safeSend(socket, message.key.remoteJid, response);
       }
@@ -299,115 +513,177 @@ async function startWhatsApp(): Promise<void> {
 
 function resumeSavedTimers(socket: ReturnType<typeof makeWASocket>): void {
   for (const game of sessions.resumableGames()) {
+    if (startupPaused.has(game.groupId) || phaseTimers.has(game.groupId) || phaseTransitions.has(game.groupId)) continue;
     const milliseconds = Math.max(0, (game.deadline ?? Date.now()) - Date.now());
     if (game.phase === "discussion") {
       const nextPhase = game.nextPhase ?? "night";
       schedulePhaseTimer(game.groupId, milliseconds, () => void enterPhase(socket, game.groupId, nextPhase, nextPhase === "night" ? "Night falls." : "Voting is now open.", "night"), nextPhase);
     } else if (game.phase === "night") {
       schedulePhaseTimer(game.groupId, milliseconds, () => void resolveNightPhase(socket, game.groupId, true));
+    } else if (game.phase === "reaction") {
+      void enterReaction(socket, game.groupId, milliseconds);
     } else if (game.phase === "voting") {
       schedulePhaseTimer(game.groupId, milliseconds, () => void resolveVotePhase(socket, game.groupId));
     }
   }
 }
 
+async function resumeGame(socket: ReturnType<typeof makeWASocket>, groupId: string): Promise<void> {
+  if (!startupPaused.has(groupId)) throw new GameError("This game is not paused after restart.");
+  const game = sessions.resumableGames().find((entry) => entry.groupId === groupId);
+  if (!game) throw new GameError("There is no active saved game to resume.");
+  startupPaused.delete(groupId);
+  await safeSend(socket, groupId, "Game resumed by a manager. This phase gets a fresh timer; saved roles, votes, and actions are retained.");
+  if (game.phase === "reaction") await enterReaction(socket, groupId);
+  else if (game.phase === "discussion" || game.phase === "night" || game.phase === "voting") {
+    await enterPhase(socket, groupId, game.phase, "Discussion resumed. Meet in the square.", game.nextPhase ?? "night");
+  }
+}
+
+async function stopGame(socket: ReturnType<typeof makeWASocket>, groupId: string, actorName: string): Promise<void> {
+  sessions.endGame(groupId);
+  startupPaused.delete(groupId);
+  clearPhaseTimer(groupId);
+  const reopened = await setDiscussionAccess(socket, groupId);
+  await safeSend(socket, groupId, `🛑 Game ended by ${actorName}. ${reopened ? "Group chat is open." : "I could not reopen group chat; a group admin needs to open it manually."}`);
+}
+
+async function flushEvents(socket: ReturnType<typeof makeWASocket>, groupId: string): Promise<void> {
+  for (const event of sessions.drainEvents(groupId)) await safeSend(socket, event.recipient ?? groupId, event.text);
+}
+
+async function continueGame(socket: ReturnType<typeof makeWASocket>, groupId: string, message?: string): Promise<void> {
+  await flushEvents(socket, groupId);
+  const view = sessions.gameSnapshot(groupId);
+  if (view.status === "ended") {
+    clearPhaseTimer(groupId);
+    await setDiscussionAccess(socket, groupId);
+    if (message) await safeSend(socket, groupId, message);
+    await safeSend(socket, groupId, victoryCard(sessions.victorySummary(groupId)));
+    recordCompletedGame(groupId);
+    await safeSend(socket, groupId, replayHighlights(sessions.replay(groupId)));
+    return;
+  }
+  if (view.phase === "reaction") {
+    if (message) await safeSend(socket, groupId, message);
+    await enterReaction(socket, groupId);
+  } else if (view.phase === "discussion") {
+    const seconds = sessions.discussionMilliseconds(groupId) / 1000;
+    await enterPhase(socket, groupId, "discussion", `${message ? `${message}\n\n` : ""}${phaseBanner(`DAY ${view.dayNumber} / THE SQUARE`, `Discussion · ${seconds}s`, discussionStory(view.dayNumber, `${groupId}:${view.startedAt}`))}`, "voting");
+  } else if (view.phase === "night") await enterPhase(socket, groupId, "night", "Night falls.");
+}
+
+async function enterReaction(socket: ReturnType<typeof makeWASocket>, groupId: string, milliseconds = 30_000): Promise<void> {
+  if (phaseTransitions.has(groupId)) return;
+  phaseTransitions.add(groupId);
+  clearPhaseTimer(groupId);
+  try {
+    await setNightAccess(socket, groupId);
+    await safeSend(socket, groupId, "A final role action is pending. The game is paused for up to 30 seconds.");
+    for (const id of sessions.reactionActors(groupId)) await safeSend(socket, id, sessions.actionPrompt(groupId, id));
+    if (sessions.gameSnapshot(groupId).phase === "reaction") schedulePhaseTimer(groupId, milliseconds, () => {
+      sessions.expireReactions(groupId);
+      void continueGame(socket, groupId);
+    });
+  } finally { phaseTransitions.delete(groupId); }
+  if (sessions.gameSnapshot(groupId).phase !== "reaction") await continueGame(socket, groupId);
+}
+
 async function enterPhase(socket: ReturnType<typeof makeWASocket>, groupId: string, phase: "discussion" | "night" | "voting", message: string, discussionNext: "night" | "voting" = "night"): Promise<void> {
+  if (phaseTransitions.has(groupId)) return;
+  phaseTransitions.add(groupId);
   clearPhaseTimer(groupId);
   logPhaseTransition(groupId, phase, "phase-entry");
   try {
     if (phase === "discussion") {
       await setDiscussionAccess(socket, groupId);
       await safeSend(socket, groupId, message);
-      schedulePhaseTimer(groupId, 60_000, () => void enterPhase(socket, groupId, discussionNext, discussionNext === "night" ? "🌑 NIGHT FALLS" : "⚖️ VOTING IS OPEN", "night"), discussionNext);
-      return;
-    }
-    if (phase === "night") {
-      if (sessions.gameSnapshot(groupId).phase === "discussion") sessions.beginNight(groupId);
-      if (sessions.gameSnapshot(groupId).status === "ended") {
-        await safeSend(socket, groupId, `${sessions.gameSnapshot(groupId).winner?.toUpperCase()} WINS.`);
-        recordCompletedGame(groupId);
-        return;
+      schedulePhaseTimer(groupId, sessions.discussionMilliseconds(groupId), () => void enterPhase(socket, groupId, discussionNext, discussionNext === "night" ? "🌑 NIGHT FALLS" : "⚖️ VOTING IS OPEN", "night"), discussionNext);
+    } else {
+      if (sessions.gameSnapshot(groupId).phase === "discussion") {
+        if (phase === "night") sessions.beginNight(groupId);
+        else sessions.beginVoting(groupId);
       }
-      else if (sessions.gameSnapshot(groupId).phase !== "night") throw new GameError("Night cannot begin from the current phase.");
+      const current = sessions.gameSnapshot(groupId);
+      if (current.status === "ended") {
+        await setDiscussionAccess(socket, groupId);
+        await safeSend(socket, groupId, victoryCard(sessions.victorySummary(groupId)));
+        await flushEvents(socket, groupId); recordCompletedGame(groupId); return;
+      }
+      const actual = current.phase;
+      if (actual !== "night" && actual !== "voting") throw new GameError("This phase cannot begin now.");
       await setNightAccess(socket, groupId);
-      await safeSend(socket, groupId, "🌑 NIGHT FALLS\n\nDiscussion is closed. Night actions are being requested privately. You have 60 seconds.");
-      const targets = rosterMessage(groupId);
-      for (const actorId of sessions.nightActors(groupId)) {
-        const actorView = sessions.privateView(groupId, actorId);
-        await safeSend(socket, actorId, `${nightPrompt(actorView.role)}\n\nTime remaining: 60 seconds.\n\n${targets}`);
+      await flushEvents(socket, groupId);
+      await safeSend(socket, groupId, actual === "night" ? phaseBanner(`NIGHT ${current.nightNumber} / LIGHTS OUT`, "60s · Powers in DM · !actions", nightStory(current.nightNumber, `${groupId}:${current.startedAt}`)) : phaseBanner("THE VERDICT", "60s · Vote privately", votingStory(current.dayNumber, `${groupId}:${current.startedAt}`)));
+      const actors = sessions.actionActors(groupId);
+      for (const player of current.players.filter((player) => player.alive)) {
+        if (actual === "voting") await safeSend(socket, player.id, votingCard(sessions.gameSnapshot(groupId)));
+        if (actors.includes(player.id)) await safeSend(socket, player.id, `${sessions.actionPrompt(groupId, player.id)}\n\n⏱ 60s`);
+        else if (actual === "night") await safeSend(socket, player.id, "🌑 *NIGHT* · Rest until dawn.\nYour passive effects apply automatically.");
       }
-      schedulePhaseTimer(groupId, 60_000, () => void resolveNightPhase(socket, groupId, true));
-      return;
+      schedulePhaseTimer(groupId, 60_000, () => actual === "night" ? void resolveNightPhase(socket, groupId, true) : void resolveVotePhase(socket, groupId));
     }
-    if (sessions.gameSnapshot(groupId).phase === "discussion") sessions.beginVoting(groupId);
-    if (sessions.gameSnapshot(groupId).status === "ended") {
-      await safeSend(socket, groupId, `${sessions.gameSnapshot(groupId).winner?.toUpperCase()} WINS.`);
-      recordCompletedGame(groupId);
-      return;
-    }
-    else if (sessions.gameSnapshot(groupId).phase !== "voting") throw new GameError("Voting cannot begin from the current phase.");
-    await setNightAccess(socket, groupId);
-    await safeSend(socket, groupId, "⚖️ VOTING IS OPEN\n\nVoting instructions have been sent privately. The group remains locked until the result.");
-    const voteTargets = rosterMessage(groupId);
-    for (const player of sessions.gameSnapshot(groupId).players.filter((candidate) => candidate.alive)) {
-      await safeSend(socket, player.id, `⚖️ VOTING\n\nYou have 60 seconds. Reply with !xeno vote <player number>. Missing votes are skipped.\n\n${voteTargets}`);
-    }
-    schedulePhaseTimer(groupId, 60_000, () => void resolveVotePhase(socket, groupId));
   } catch (error) {
-    await safeSend(socket, groupId, error instanceof GameError ? error.message : "Night could not begin.");
-  }
+    await safeSend(socket, groupId, error instanceof GameError ? error.message : "The phase could not begin.");
+  } finally { phaseTransitions.delete(groupId); }
+  const current = sessions.gameSnapshot(groupId);
+  if (current.phase === "night" && sessions.allNightActionsSubmitted(groupId)) await resolveNightPhase(socket, groupId, false);
+  else if (current.phase === "voting" && sessions.allVotesSubmitted(groupId)) await resolveVotePhase(socket, groupId, "all-votes-submitted");
 }
 
 async function resolveNightPhase(socket: ReturnType<typeof makeWASocket>, groupId: string, force: boolean): Promise<void> {
-  clearPhaseTimer(groupId);
+  if (phaseTransitions.has(groupId)) return;
+  phaseTransitions.add(groupId);
   logPhaseTransition(groupId, "night-resolution", force ? "timer" : "all-actions-submitted");
+  let dawn: string | undefined;
   try {
     const result = sessions.resolveNight(groupId, force);
-    const publicView = sessions.gameSnapshot(groupId);
-    for (const investigation of result.investigations) {
-      await safeSend(socket, investigation.seerId, `🔮 DIVINATION RESULT\n\n${publicView.players.find((player) => player.id === investigation.targetId)?.displayName ?? investigation.targetId} belongs to the ${investigation.faction} faction.`);
-    }
-    const deaths = result.deaths.map((id) => publicView.players.find((player) => player.id === id)?.displayName ?? id);
-    const dawn = deaths.length ? `🌅 DAWN\n\n${deaths.join(" and ")} did not survive the night.` : "🌅 DAWN\n\nThe darkness recedes. No one was lost this night.";
-    if (result.winner) recordCompletedGame(groupId);
-    if (!result.winner) void enterPhase(socket, groupId, "discussion", `${dawn}\n\nDay ${publicView.dayNumber} discussion begins. You have 60 seconds.`, "voting");
+    clearPhaseTimer(groupId);
+    const view = sessions.gameSnapshot(groupId);
+    const deaths = result.deaths.map((id) => ({ ...view.deaths.find((death) => death.playerId === id)!, displayName: view.players.find((player) => player.id === id)?.displayName ?? id }));
+    dawn = phaseBanner("DAWN / THE RECKONING", `Day ${view.dayNumber}`, dawnStory(view.dayNumber, deaths, `${groupId}:${view.startedAt}`));
+    if (deaths.length) dawn += `\n\n${result.deaths.map((id) => deceasedLabel(view, id)).join("\n")}`;
   } catch (error) {
     await safeSend(socket, groupId, error instanceof GameError ? error.message : "Night could not be resolved.");
-  }
+  } finally { phaseTransitions.delete(groupId); }
+  if (dawn) await continueGame(socket, groupId, dawn);
 }
 
 async function resolveVotePhase(socket: ReturnType<typeof makeWASocket>, groupId: string, trigger: "timer" | "all-votes-submitted" | "manual" = "timer"): Promise<void> {
-  clearPhaseTimer(groupId);
+  if (phaseTransitions.has(groupId)) return;
+  phaseTransitions.add(groupId);
   logPhaseTransition(groupId, "vote-resolution", trigger);
+  let resolved = false;
   try {
-    const result = sessions.resolveVote(groupId, true);
+    const result = sessions.resolveVote(groupId, trigger === "timer");
+    clearPhaseTimer(groupId);
     const view = sessions.gameSnapshot(groupId);
-    const death = result.eliminatedPlayerId ? view.players.find((player) => player.id === result.eliminatedPlayerId) : null;
-    await safeSend(socket, groupId, death ? `⚖️ VOTE RESOLVED\n\n${death.displayName} has been eliminated.` : "⚖️ VOTE RESOLVED\n\nNo eligible vote was received or the vote tied.");
-    if (result.winner) {
-      await safeSend(socket, groupId, `${result.winner.toUpperCase()} WINS.`);
-      recordCompletedGame(groupId);
-    } else {
-      void enterPhase(socket, groupId, "night", "🌑 NIGHT FALLS", "night");
-    }
+    await safeSend(socket, groupId, result.eliminatedPlayerId ? `⚖️ VOTE RESOLVED\n\n${deceasedLabel(view, result.eliminatedPlayerId)} has been eliminated.` : "⚖️ VOTE RESOLVED\n\nNo player was eliminated by the vote.");
+    await safeSend(socket, groupId, verdictStory(result.eliminatedPlayerId ? view.players.find((player) => player.id === result.eliminatedPlayerId)?.displayName ?? null : null));
+    resolved = true;
   } catch (error) {
     await safeSend(socket, groupId, error instanceof GameError ? error.message : "Voting could not be resolved.");
-  }
+  } finally { phaseTransitions.delete(groupId); }
+  if (resolved) await continueGame(socket, groupId);
 }
 
 async function setNightAccess(socket: ReturnType<typeof makeWASocket>, groupId: string): Promise<void> {
   try {
+    if (!isActiveGame(groupId)) return;
     await socket.groupSettingUpdate(groupId, "announcement");
+    if (!isActiveGame(groupId)) await setDiscussionAccess(socket, groupId);
   } catch (error) {
     console.error(`Could not lock ${groupId}; the bot may not be a group admin.`, error instanceof Error ? error.message : error);
   }
 }
 
-async function setDiscussionAccess(socket: ReturnType<typeof makeWASocket>, groupId: string): Promise<void> {
+async function setDiscussionAccess(socket: ReturnType<typeof makeWASocket>, groupId: string): Promise<boolean> {
   try {
     await socket.groupSettingUpdate(groupId, "not_announcement");
+    return true;
   } catch (error) {
     console.error(`Could not open ${groupId}; the bot may not be a group admin.`, error instanceof Error ? error.message : error);
+    return false;
   }
 }
 

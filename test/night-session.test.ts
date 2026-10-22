@@ -41,7 +41,7 @@ test("accepts a complete set of night actions without waiting for timeout", () =
   const started = sessions.startGame("group", "host");
   sessions.beginNight("group");
   const roles = Object.fromEntries(started.players.map((player) => [player.id, started.engine.privateView(player.id).role]));
-  const targetNumber = 1;
+  const targetNumber = started.players.findIndex((player) => roles[player.id] !== "werewolf") + 1;
   for (const [playerId, role] of Object.entries(roles)) {
     if (role === "werewolf" || role === "seer" || role === "doctor") sessions.submitNightAction("group", playerId, targetNumber);
   }

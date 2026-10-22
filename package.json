@@ -6,7 +6,8 @@
   "scripts": {
     "start:whatsapp": "node --experimental-strip-types src/whatsapp.ts",
     "test": "node --test --experimental-strip-types",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "gm": "node --experimental-strip-types src/gm-cli.ts"
   },
   "devDependencies": {
     "@types/node": "^26.4.0",
@@ -15,6 +16,7 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
+    "@resvg/resvg-wasm": "^2.6.2",
     "@whiskeysockets/baileys": "^7.0.0-rc14",
     "pino": "^10.3.1",
     "qrcode": "^1.5.4",
