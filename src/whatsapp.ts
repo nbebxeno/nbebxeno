@@ -20,7 +20,15 @@ const startupPaused = new Set(sessions.resumableGames().map((game) => game.group
 const recoveryNotified = new Set<string>();
 const processStartedAt = Date.now();
 const debugInbound = process.env.LORDXENO_DEBUG === "1";
-function inboundLog(message: string): void { if (debugInbound) console.log(`[inbound] ${message}`); }
+const debugLastPrinted = new Map<string, number>();
+function inboundLog(message: string): void {
+  if (!debugInbound) return;
+  // Repeated history events must not flood the terminal.
+  const now = Date.now();
+  if (now - (debugLastPrinted.get(message) ?? -Infinity) < 10_000) return;
+  debugLastPrinted.set(message, now);
+  console.log(`[inbound] ${message}`);
+}
 const seenMessages = new Set<string>();
 const phaseTransitions = new Set<string>();
 const phaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -215,7 +223,7 @@ async function startWhatsApp(): Promise<void> {
 
   socket.ev.on("messages.upsert", async ({ messages, type }) => {
     if (activeSocket !== socket) return;
-    inboundLog(`event=${type ?? "unknown"} count=${messages.length}`);
+
     // Baileys may deliver live companion-device messages as append. Timestamp
     // freshness, not the batch label, distinguishes these from old history.
 
@@ -224,21 +232,31 @@ async function startWhatsApp(): Promise<void> {
         inboundLog(`skip=missing-body-or-destination stub=${message.messageStubType ?? "none"}`);
         continue;
       }
+      const remoteJid = message.key.remoteJid;
+      const text = messageText(message.message).trim();
+      const command = normalizeCommand(text);
+      const commandName = resolveCommand(command)?.name;
+      // Ordinary messages and history are irrelevant to command diagnostics.
+      if (!commandName) continue;
       const timestamp = Number(message.messageTimestamp);
       const hasTimestamp = Number.isFinite(timestamp) && timestamp > 0;
-      if (type === "append" && !hasTimestamp) { inboundLog("skip=undated-history"); continue; }
-      if (hasTimestamp && timestamp * 1000 < processStartedAt - 3_000) { inboundLog("skip=pre-startup-timestamp"); continue; }
-      const messageId = message.key.id ? `${message.key.remoteJid}:${message.key.participant ?? ""}:${message.key.fromMe ? "own" : "peer"}:${message.key.id}` : undefined;
+      const olderThanStartup = hasTimestamp && timestamp * 1000 < processStartedAt - 3_000;
+      const recoveryRead = ["ping", "help", "gm", "games", "status", "players"].includes(commandName);
+      const historicalDelivery = type !== "notify" && ((type === "append" && !hasTimestamp) || olderThanStartup);
+      const recoveryEnd = commandName === "endgame" && (startupPaused.has(remoteJid) || !remoteJid.endsWith("@g.us"));
+      // notify is Baileys' live-delivery signal. Do not reject live commands
+      // by comparing WhatsApp's clock with an Android device's local clock.
+      // Recovery reads never mutate a game and must work with missing/old timestamps.
+      if (!recoveryRead && !recoveryEnd && historicalDelivery) {
+        inboundLog(`skip=old-history-command command=${commandName}`);
+        continue;
+      }
+      const messageId = message.key.id ? `${remoteJid}:${message.key.participant ?? ""}:${message.key.fromMe ? "own" : "peer"}:${message.key.id}` : undefined;
       if (messageId) {
         if (seenMessages.has(messageId)) { inboundLog("skip=duplicate-id"); continue; }
         seenMessages.add(messageId);
         if (seenMessages.size > 5_000) seenMessages.delete(seenMessages.values().next().value!);
       }
-      const remoteJid = message.key.remoteJid;
-      const text = messageText(message.message).trim();
-      const command = normalizeCommand(text);
-      const commandName = resolveCommand(command)?.name;
-      if (!commandName) { inboundLog(`skip=not-a-command text=${text ? "present" : "absent"}`); continue; }
       if (message.key.fromMe && !["endgame", "resume", "kick", "gm", "games", "help", "ping", "status", "players"].includes(commandName)) { inboundLog(`skip=own-gameplay-command command=${commandName}`); continue; }
       inboundLog(`command=${commandName} own=${Boolean(message.key.fromMe)} scope=${remoteJid.endsWith("@g.us") ? "group" : "dm"}`);
       const commandKey = `${message.key.remoteJid}:${participantIdentity(message)}:${command}`;
@@ -287,6 +305,7 @@ async function startWhatsApp(): Promise<void> {
             }
             if (!target) throw new GameError(permanent ? "Use !games, then !endgame <game-code> or !resume <game-code> to choose a saved game." : "Send !endgame in your group or specify its game code.");
             if (!permanent && !await managerAccess(socket, target.groupId, privateIdentities, message.key.fromMe ?? false)) throw new GameError("Only a group admin or permanent Game Master can end this game.");
+            if (commandName === "endgame" && historicalDelivery && !startupPaused.has(target.groupId)) throw new GameError("This cancellation arrived as old history. Send a fresh !endgame in the group, or correct Android's automatic date/time and retry.");
             if (commandName === "resume") {
               await resumeGame(socket, target.groupId);
               await safeSend(socket, remoteJid, "Game resumed. The group has been notified.");

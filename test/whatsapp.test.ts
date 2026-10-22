@@ -66,7 +66,7 @@ test("WhatsApp keeps voting private while locked, suppresses repeat joins, and c
     for (let i = 0; i < 15; i++) await setImmediate();
     const recoveryCount = sent.filter(message => message.text.includes("PAUSED after restart")).length;
     assert.equal(recoveryCount, 2);
-    await receive({ type: "notify", messages: [{ key: { fromMe: true, remoteJid: "abandoned@g.us" }, message: { conversation: "!endgame" } }] });
+    await receive({ type: "append", messages: [{ messageTimestamp: 1, key: { fromMe: true, remoteJid: "abandoned@g.us" }, message: { conversation: "!endgame" } }] });
     assert.match(sent.at(-1)!.text, /Game ended/);
     const stopped = JSON.parse(readFileSync(".data/lordxeno-games.json", "utf8")).find((game: any) => game.groupId === "abandoned@g.us");
     assert.equal(stopped.engineState.status, "ended", "the linked account must be able to cancel a paused saved game");
@@ -77,7 +77,7 @@ test("WhatsApp keeps voting private while locked, suppresses repeat joins, and c
     await receive({ messages: [{ key: { remoteJid: advancedIds[0] }, message: { conversation: "!act attack 8" } }] });
     assert.match(sent.at(-1)!.text, /paused after restart/);
     await receive({ type: "append", messages: [{ key: { remoteJid: "history@g.us", participant: "1@s.whatsapp.net" }, message: { conversation: "!lobby" } }] });
-    await receive({ type: "notify", messages: [{ messageTimestamp: 1, key: { remoteJid: "old@g.us", participant: "1@s.whatsapp.net" }, message: { conversation: "!lobby" } }] });
+    await receive({ type: "append", messages: [{ messageTimestamp: 1, key: { remoteJid: "old@g.us", participant: "1@s.whatsapp.net" }, message: { conversation: "!lobby" } }] });
     const storedGroups = JSON.parse(readFileSync(".data/lordxeno-games.json", "utf8")).map((game: any) => game.groupId);
     assert.equal(storedGroups.includes("history@g.us"), false);
     assert.equal(storedGroups.includes("old@g.us"), false);
@@ -87,6 +87,14 @@ test("WhatsApp keeps voting private while locked, suppresses repeat joins, and c
     assert.match(sent.at(-1)!.text, /LORDXENO · HELP/, "fresh append DMs must not be dropped as history");
     await receive({ type: "append", messages: [{ messageTimestamp: Math.floor(Date.now() / 1000), key: { remoteJid: "fresh@g.us", participant: "fresh@s.whatsapp.net" }, message: { conversation: "!ping" } }] });
     assert.match(sent.at(-1)!.text, /transport online/, "fresh append group commands must be processed");
+    await receive({ type: "append", messages: [{ messageTimestamp: 1, key: { remoteJid: "clock-skew@s.whatsapp.net", id: "skew-ping" }, message: { conversation: "!Ping" } }] });
+    assert.match(sent.at(-1)!.text, /transport online/, "ping must survive a skewed clock in append deliveries");
+    await receive({ type: "append", messages: [{ key: { remoteJid: "undated@s.whatsapp.net" }, message: { conversation: "!help" } }] });
+    assert.match(sent.at(-1)!.text, /LORDXENO · HELP/, "help must survive missing timestamps");
+    await receive({ type: "notify", messages: [{ messageTimestamp: 1, key: { remoteJid: "live@g.us", participant: "1@s.whatsapp.net" }, message: { conversation: "!lobby" } }] });
+    assert.match(sent.at(-1)!.text, /THE GATHERING/, "live notify commands must not rely on local clock agreement");
+    await receive({ type: "notify", messages: [{ messageTimestamp: 1, key: { remoteJid: "live@g.us", fromMe: true }, message: { conversation: "!endgame" } }] });
+    assert.match(sent.at(-1)!.text, /Game ended/, "live cancellation must work despite clock skew");
     const afterOwnHelp = sent.length;
     t.mock.timers.tick(1000);
     await receive({ messages: [{ key: { fromMe: true, remoteJid: "advanced@g.us", id: "own-help" }, message: { conversation: "!help" } }] });
