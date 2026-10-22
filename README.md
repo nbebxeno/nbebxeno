@@ -170,7 +170,7 @@ The image renderer uses WebAssembly rather than a native image module. Android's
 
 ## Restart recovery and emergency control
 
-A cold start loads saved games **paused**. Expired timers do not start or advance phases. On connecting, the bot attempts to reopen each paused group's chat and posts one recovery notice. A group admin or permanent GM can send `!endgame` to cancel or `!resume` to continue. In DM, use `!games` then `!endgame <code>` / `!resume <code>`. Resume retains roles/votes/actions and gives the current phase a fresh timer (discussion 120s, night/voting 60s, reactions 30s). An ordinary connection reconnect within the same process retains running-game deadlines; this differs from restarting Node.
+A cold start loads saved games **paused**. Expired timers do not start or advance phases. Connecting or reconnecting is silent: the bot sends no recovery announcements and does not change any paused group's messaging settings. A group admin or permanent GM can send `!endgame` to cancel or `!resume` to continue. In DM, use `!games` then `!endgame <code>` / `!resume <code>`. Resume retains roles/votes/actions and gives the current phase a fresh timer (discussion 120s, night/voting 60s, reactions 30s). An ordinary connection reconnect within the same process retains running-game deadlines; this differs from restarting Node.
 
 `!help`, `!ping`, `!status`, and `!players` now also work from the linked bot account, alongside GM controls. Ordinary own messages still cannot join or start games. Disappearing-message wrappers are supported. Synced history, pre-startup commands, and duplicate message IDs do not run commands again. Send a fresh command after reconnecting.
 

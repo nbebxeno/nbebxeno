@@ -65,7 +65,13 @@ test("WhatsApp keeps voting private while locked, suppresses repeat joins, and c
     await handlers.get("connection.update")!({ connection: "open" });
     for (let i = 0; i < 15; i++) await setImmediate();
     const recoveryCount = sent.filter(message => message.text.includes("PAUSED after restart")).length;
-    assert.equal(recoveryCount, 2);
+    assert.equal(recoveryCount, 0, "startup must not announce restored paused games");
+    assert.equal(sent.length, 0, "startup must remain silent in groups and DMs");
+    assert.equal(settings.length, 0, "startup must not change any group messaging settings");
+    await handlers.get("connection.update")!({ connection: "open" });
+    for (let i = 0; i < 15; i++) await setImmediate();
+    assert.equal(sent.length, 0, "reconnection must not announce paused games");
+    assert.equal(settings.length, 0, "reconnection must not unlock paused groups");
     await receive({ type: "append", messages: [{ messageTimestamp: 1, key: { fromMe: true, remoteJid: "abandoned@g.us" }, message: { conversation: "!endgame" } }] });
     assert.match(sent.at(-1)!.text, /Game ended/);
     const stopped = JSON.parse(readFileSync(".data/lordxeno-games.json", "utf8")).find((game: any) => game.groupId === "abandoned@g.us");

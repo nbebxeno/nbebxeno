@@ -17,7 +17,6 @@ const qrImagePath = `${authDirectory}/whatsapp-qr.png`;
 const sessions = new GameSessions({ tieRule: "no-elimination", revealRoleOnDeath: true }, "./.data/lordxeno-games.json");
 // Cold starts must never advance an old saved game without a manager's decision.
 const startupPaused = new Set(sessions.resumableGames().map((game) => game.groupId));
-const recoveryNotified = new Set<string>();
 const processStartedAt = Date.now();
 const debugInbound = process.env.LORDXENO_DEBUG === "1";
 const debugLastPrinted = new Map<string, number>();
@@ -192,12 +191,6 @@ async function startWhatsApp(): Promise<void> {
     }
     if (connection === "open") {
       console.log("lordxeno is connected to WhatsApp.");
-      for (const groupId of startupPaused) {
-        if (recoveryNotified.has(groupId)) continue;
-        recoveryNotified.add(groupId);
-        await setDiscussionAccess(socket, groupId);
-        await safeSend(socket, groupId, "Saved game PAUSED after restart. No phases will advance. A group admin or GM can use !endgame to cancel, or !resume to continue. Chat is open if I have admin access.");
-      }
       resumeSavedTimers(socket);
     }
     if (connection === "close") {
