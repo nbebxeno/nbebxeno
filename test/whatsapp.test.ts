@@ -83,6 +83,10 @@ test("WhatsApp keeps voting private while locked, suppresses repeat joins, and c
     assert.equal(storedGroups.includes("old@g.us"), false);
     await receive({ messages: [{ key: { fromMe: true, remoteJid: "advanced@g.us", id: "own-help" }, message: { conversation: "!help" } }] });
     assert.match(sent.at(-1)!.text, /LORDXENO · HELP/);
+    await receive({ type: "append", messages: [{ messageTimestamp: Math.floor(Date.now() / 1000), key: { remoteJid: "fresh@s.whatsapp.net" }, message: { conversation: "!help" } }] });
+    assert.match(sent.at(-1)!.text, /LORDXENO · HELP/, "fresh append DMs must not be dropped as history");
+    await receive({ type: "append", messages: [{ messageTimestamp: Math.floor(Date.now() / 1000), key: { remoteJid: "fresh@g.us", participant: "fresh@s.whatsapp.net" }, message: { conversation: "!ping" } }] });
+    assert.match(sent.at(-1)!.text, /transport online/, "fresh append group commands must be processed");
     const afterOwnHelp = sent.length;
     t.mock.timers.tick(1000);
     await receive({ messages: [{ key: { fromMe: true, remoteJid: "advanced@g.us", id: "own-help" }, message: { conversation: "!help" } }] });

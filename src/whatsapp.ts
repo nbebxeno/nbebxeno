@@ -19,6 +19,8 @@ const sessions = new GameSessions({ tieRule: "no-elimination", revealRoleOnDeath
 const startupPaused = new Set(sessions.resumableGames().map((game) => game.groupId));
 const recoveryNotified = new Set<string>();
 const processStartedAt = Date.now();
+const debugInbound = process.env.LORDXENO_DEBUG === "1";
+function inboundLog(message: string): void { if (debugInbound) console.log(`[inbound] ${message}`); }
 const seenMessages = new Set<string>();
 const phaseTransitions = new Set<string>();
 const phaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -156,6 +158,7 @@ async function safeSend(socket: ReturnType<typeof makeWASocket>, jid: string, te
   }
   try {
     await socket.sendMessage(jid, { text });
+    inboundLog("reply sent");
   } catch (error) {
     console.error("WhatsApp message was not sent:", error instanceof Error ? error.message : error);
   }
@@ -166,7 +169,7 @@ async function startWhatsApp(): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState(authDirectory);
   const socket = makeWASocket({
     auth: state,
-    logger: pino({ level: "silent" }),
+    logger: pino({ level: debugInbound ? "warn" : "silent" }),
     printQRInTerminal: false
   });
   activeSocket = socket;
@@ -211,16 +214,23 @@ async function startWhatsApp(): Promise<void> {
   });
 
   socket.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (activeSocket !== socket || (type && type !== "notify")) return;
-    // History sync and offline command delivery must not replay old !start/!end commands.
+    if (activeSocket !== socket) return;
+    inboundLog(`event=${type ?? "unknown"} count=${messages.length}`);
+    // Baileys may deliver live companion-device messages as append. Timestamp
+    // freshness, not the batch label, distinguishes these from old history.
 
     for (const message of messages) {
-      if (!message.message || !message.key.remoteJid) continue;
+      if (!message.message || !message.key.remoteJid) {
+        inboundLog(`skip=missing-body-or-destination stub=${message.messageStubType ?? "none"}`);
+        continue;
+      }
       const timestamp = Number(message.messageTimestamp);
-      if (Number.isFinite(timestamp) && timestamp > 0 && timestamp * 1000 < processStartedAt - 3_000) continue;
+      const hasTimestamp = Number.isFinite(timestamp) && timestamp > 0;
+      if (type === "append" && !hasTimestamp) { inboundLog("skip=undated-history"); continue; }
+      if (hasTimestamp && timestamp * 1000 < processStartedAt - 3_000) { inboundLog("skip=pre-startup-timestamp"); continue; }
       const messageId = message.key.id ? `${message.key.remoteJid}:${message.key.participant ?? ""}:${message.key.fromMe ? "own" : "peer"}:${message.key.id}` : undefined;
       if (messageId) {
-        if (seenMessages.has(messageId)) continue;
+        if (seenMessages.has(messageId)) { inboundLog("skip=duplicate-id"); continue; }
         seenMessages.add(messageId);
         if (seenMessages.size > 5_000) seenMessages.delete(seenMessages.values().next().value!);
       }
@@ -228,10 +238,12 @@ async function startWhatsApp(): Promise<void> {
       const text = messageText(message.message).trim();
       const command = normalizeCommand(text);
       const commandName = resolveCommand(command)?.name;
-      if (!commandName || (message.key.fromMe && !["endgame", "resume", "kick", "gm", "games", "help", "ping", "status", "players"].includes(commandName))) continue;
+      if (!commandName) { inboundLog(`skip=not-a-command text=${text ? "present" : "absent"}`); continue; }
+      if (message.key.fromMe && !["endgame", "resume", "kick", "gm", "games", "help", "ping", "status", "players"].includes(commandName)) { inboundLog(`skip=own-gameplay-command command=${commandName}`); continue; }
+      inboundLog(`command=${commandName} own=${Boolean(message.key.fromMe)} scope=${remoteJid.endsWith("@g.us") ? "group" : "dm"}`);
       const commandKey = `${message.key.remoteJid}:${participantIdentity(message)}:${command}`;
       const lastCommand = commandCooldowns.get(commandKey) ?? 0;
-      if (Date.now() - lastCommand < 750) continue;
+      if (Date.now() - lastCommand < 750) { inboundLog("skip=cooldown"); continue; }
       commandCooldowns.set(commandKey, Date.now());
       if (commandName === "ping") {
         await safeSend(socket, message.key.remoteJid, "lordxeno transport online.");
